@@ -430,14 +430,12 @@ struct ContentView: View {
                     .padding(10)
                 )
                 .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-                    handleDrop(providers) { p in
-                        if !droppedInstalls.contains(p) { droppedInstalls.append(p) }
-                    }
+                    handleDrop(providers) { addInstallFile($0) }
                     return true
                 }
             HStack {
                 Button("选择文件") {
-                    if let p = chooseFile() { if !droppedInstalls.contains(p) { droppedInstalls.append(p) } }
+                    if let p = chooseFile() { addInstallFile(p) }
                 }
                 Spacer()
                 Button(action: {
@@ -637,6 +635,17 @@ struct ContentView: View {
         return nil
     }
 
+    // 仅允许 .app/.dmg/.pkg 进入安装列表,其他格式即时提示不支持
+    private func addInstallFile(_ p: String) {
+        let ext = (p as NSString).pathExtension.lowercased()
+        guard ["app", "dmg", "pkg"].contains(ext) else {
+            let label = ext.isEmpty ? "无扩展名" : ext
+            client.showToast("✗ 不支持的格式：\(label)（仅支持 .app/.dmg/.pkg）", target: .window)
+            return
+        }
+        if !droppedInstalls.contains(p) { droppedInstalls.append(p) }
+    }
+
     private func handleDrop(_ providers: [NSItemProvider], set: @escaping (String) -> Void) {
         guard !providers.isEmpty else { return }
         for p in providers {
@@ -694,13 +703,14 @@ struct ContentView: View {
         }
     }
 
-    // MARK: 成功浮窗
+    // MARK: 成功/提示浮窗
     private struct ToastView: View {
         let message: String
+        private var isError: Bool { message.hasPrefix("✗") }
         var body: some View {
             HStack(spacing: 8) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+                Image(systemName: isError ? "xmark.circle.fill" : "checkmark.circle.fill")
+                    .foregroundStyle(isError ? .red : .green)
                     .font(.title3)
                 Text(message)
                     .font(.headline)
@@ -714,7 +724,7 @@ struct ContentView: View {
                     .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
             )
             .overlay(
-                Capsule().stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
+                Capsule().stroke(isError ? Color.red.opacity(0.5) : Color(nsColor: .separatorColor), lineWidth: 0.5)
             )
         }
     }
