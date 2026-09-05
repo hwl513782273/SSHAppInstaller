@@ -1,17 +1,35 @@
-# SSHAppInstaller / SSH 应用安装器
+<p align="center">
+  <img src="app-icon.png" width="128" alt="SSHAppInstaller">
+</p>
 
-> 一款原生 macOS 图形化工具：填一次 SSH 信息，就能把 `.app` / `.dmg` / `.pkg` 拖拽安装到另一台 Mac 的 /Applications，附带双向传文件，类似「跨 Mac 的应用安装器」。
-> A native macOS GUI that installs `.app` / `.dmg` / `.pkg` onto another Mac over SSH with drag-and-drop, plus two-way file transfer — like a cross-Mac app installer.
+<h1 align="center">SSHAppInstaller / SSH 应用安装器</h1>
 
-> **作者 Author：banqiu**
->
-> **许可证 License：MIT**（详见 [LICENSE](https://github.com/hwl513782273/SSHAppInstaller/blob/main/LICENSE)）。可自由使用、修改与再分发，须保留版权与许可声明。
+<p align="center">
+  <b>中文</b> | <a href="#english">English</a>
+</p>
 
-![SSHAppInstaller 图标](app-icon.png)
 
-[下载最新版 / Download](https://github.com/hwl513782273/SSHAppInstaller/releases/latest) · [问题反馈 / Issues](https://github.com/hwl513782273/SSHAppInstaller/issues)
+<p align="center">
+  <img src="https://img.shields.io/badge/platform-macOS-black" alt="platform">
+  <img src="https://img.shields.io/badge/arch-arm64-blue" alt="arch">
+  <img src="https://img.shields.io/badge/engine-SwiftUI-orange" alt="engine">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
+</p>
+
 
 ---
+
+<p align="center">
+  <a href="https://github.com/hwl513782273/SSHAppInstaller/releases/latest">下载最新版 / Download</a>
+  ·
+  <a href="https://github.com/hwl513782273/SSHAppInstaller/issues">问题反馈 / Issues</a>
+</p>
+
+> 一款原生 macOS 图形化工具：填一次 SSH 信息，就能把 `.app` / `.dmg` / `.pkg` 拖拽安装到另一台 Mac 的 /Applications，附带双向传文件，类似「跨 Mac 的应用安装器」。/ A native macOS GUI that installs `.app` / `.dmg` / `.pkg` onto another Mac over SSH with drag-and-drop, plus two-way file transfer — like a cross-Mac app installer.
+
+> **作者 Author：banqiu** **许可证 License：MIT**（详见 LICENSE）。可自由使用、修改与再分发，须保留版权与许可声明。
+
+
 
 ## 中文
 
@@ -164,4 +182,4 @@ bash make_dmg.sh
 
 ## 支持 / Support
 
-SSHAppInstaller 是一款免费开源工具，基于 MIT 许可发布，离线、无广告。如果你觉得好用，欢迎在 GitHub 上点个 Star，或反馈问题 / 提交 PR 帮它变得更好 —— 纯自愿。 SSHAppInstaller is free, open-source, and ad-free under the MIT License. If it helps you, a GitHub Star or an issue/PR is warmly welcome — entirely optional.
+SSH 应用安装器 是一款免费开源工具，基于 MIT 许可发布，离线、无广告。如果你觉得好用，欢迎在 GitHub 上点个 Star，或反馈问题 / 提交 PR 帮它变得更好 —— 纯自愿。 SSHAppInstaller is free, open-source, and ad-free. If it helps you, a GitHub Star or an issue/PR is warmly welcome — entirely optional.
