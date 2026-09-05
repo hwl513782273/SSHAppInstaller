@@ -6,6 +6,7 @@ enum ToastTarget { case window, transferBox }
 struct ToastInfo: Equatable {
     let message: String
     let target: ToastTarget
+    let id = UUID()      // 每条提示唯一,确保 SwiftUI 一定识别为变化并重播动画
 }
 
 // MARK: - SSH 执行核心
@@ -14,9 +15,22 @@ final class SSHClient: ObservableObject {
     @Published var log: String = ""
     @Published var connectionOK: Bool = false
     @Published var toast: ToastInfo? = nil   // 成功浮窗(含显示位置)
+    private var toastDismissWork: DispatchWorkItem? = nil
 
+    // 自动消失:新提示先取消上一条的清除任务,清除时只清自己那条(id 比对),彻底避免竞态残留
     func showToast(_ s: String, target: ToastTarget = .window) {
-        DispatchQueue.main.async { self.toast = ToastInfo(message: s, target: target) }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            let info = ToastInfo(message: s, target: target)
+            self.toast = info
+            self.toastDismissWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                if self.toast?.id == info.id { self.toast = nil }
+            }
+            self.toastDismissWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.6, execute: work)
+        }
     }
 
     // 连接配置（均为内存态，密码不落盘）
@@ -301,12 +315,6 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.25), value: client.toast)
-        .onReceive(client.$toast) { _ in
-            guard client.toast != nil else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) {
-                if client.toast != nil { client.toast = nil }
-            }
-        }
     }
 
     // MARK: 连接配置
@@ -598,9 +606,10 @@ struct ContentView: View {
         .overlay(alignment: .center) {
             if client.toast?.target == .transferBox, let msg = client.toast?.message {
                 ToastView(message: msg)
-                    .transition(.opacity.combined(with: .scale))
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
         }
+        .animation(.easeInOut(duration: 0.25), value: client.toast)
         .onChange(of: transferDownload) {
             if transferRemote.isEmpty {
                 transferRemote = "/Users/\(client.user)/Downloads/"
