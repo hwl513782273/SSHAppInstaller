@@ -23,7 +23,7 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>WorkBuddy</string>
+    <string>Copyright © 2026 banqiu. Released under the MIT License.</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
 </dict>

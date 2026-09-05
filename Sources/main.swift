@@ -66,20 +66,45 @@ final class SSHClient: ObservableObject {
     init() { loadConnection() }
 
     private func append(_ s: String) {
-        DispatchQueue.main.async { self.log += s + "\n" }
+        DispatchQueue.main.async {
+            self.log += s + "\n"
+            // 限长：长任务会持续追加，超大字符串会让 SwiftUI 渲染明显变卡
+            let limit = 20000
+            if self.log.count > limit { self.log = String(self.log.suffix(limit)) }
+        }
     }
     func clearLog() { DispatchQueue.main.async { self.log = "" } }
 
-    // 通用 askpass 助手（只回显环境变量里的密码,脚本本身不含密码）
-    private func askpassHelperPath() -> String {
-        let dir = NSTemporaryDirectory()
-        let path = (dir as NSString).appendingPathComponent("sshappinstaller_askpass.sh")
-        if !FileManager.default.fileExists(atPath: path) {
+    // MARK: askpass 助手（脚本只回显环境变量里的密码，自身不含密码）
+    // 安全要求：路径不可预测 + 仅本人可访问。
+    // 原实现写在固定路径、且不校验已有文件的内容与属主，任何人抢先创建该文件
+    // 就能通过 SSH_ASKPASS_PASSWORD 截获密码（CWE-377 不安全的临时文件）。
+    private var askpassDir: URL? = nil
+    private var askpassScript: String? = nil
+
+    private func askpassHelperPath() -> String? {
+        if let s = askpassScript { return s }
+        let base = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("sshappinstaller_\(UUID().uuidString)", isDirectory: true)
+        let scriptURL = base.appendingPathComponent("askpass.sh")
+        do {
+            try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
             let script = "#!/bin/sh\necho \"$SSH_ASKPASS_PASSWORD\"\n"
-            try? script.write(to: URL(fileURLWithPath: path), atomically: true, encoding: .utf8)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+            askpassDir = base
+            askpassScript = scriptURL.path
+            return scriptURL.path
+        } catch {
+            append("✗ askpass 助手创建失败:\(error.localizedDescription)")
+            return nil
         }
-        return path
+    }
+
+    // 退出时清理自己创建的临时目录（仅本人生前创建的那个，路径随机、权限 0700）
+    deinit {
+        if let d = askpassDir { try? FileManager.default.removeItem(at: d) }
     }
 
     private func sshArgs() -> [String] {
@@ -111,7 +136,8 @@ final class SSHClient: ObservableObject {
         return a
     }
 
-    private func run(launch: String, args: [String], usePassword: Bool) -> (Bool, String) {
+    /// 统一子进程执行：并发抽干 out/err（避免管道写满死锁）+ 超时终止（避免网络挂起卡死）
+    private func run(launch: String, args: [String], usePassword: Bool, timeout: TimeInterval = 600) -> (Bool, String) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: launch)
         proc.arguments = args
@@ -121,62 +147,121 @@ final class SSHClient: ObservableObject {
         proc.standardError = err
         var env = ProcessInfo.processInfo.environment
         if usePassword && !password.isEmpty {
+            guard let helper = askpassHelperPath() else {
+                return (false, "密码助手创建失败，无法使用密码认证")
+            }
             env["SSH_ASKPASS_REQUIRE"] = "force"
-            env["SSH_ASKPASS"] = askpassHelperPath()
+            env["SSH_ASKPASS"] = helper
             env["SSH_ASKPASS_PASSWORD"] = password
             env["DISPLAY"] = ":0"
         }
         proc.environment = env
+        let startedAt = Date()
         do {
             try proc.run()
         } catch {
             return (false, "启动失败: \(error)")
         }
+
+        // 顺序关键：先并发抽干两个管道，再 waitUntilExit。
+        // 若先 waitUntilExit，子进程输出一旦超过管道缓冲区(约 64KB)就会阻塞写入，
+        // 而父进程正卡在 waitUntilExit 等它退出 —— 双向死等，界面永久卡死。
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var outBuf = Data()
+        var errBuf = Data()
+
+        group.enter()
+        DispatchQueue.global().async {
+            var buf = Data()
+            while true {
+                let d = out.fileHandleForReading.availableData
+                if d.isEmpty { break }
+                buf.append(d)
+            }
+            lock.lock(); outBuf = buf; lock.unlock()
+            group.leave()
+        }
+
+        group.enter()
+        DispatchQueue.global().async {
+            var buf = Data()
+            while true {
+                let d = err.fileHandleForReading.availableData
+                if d.isEmpty { break }
+                buf.append(d)
+            }
+            lock.lock(); errBuf = buf; lock.unlock()
+            group.leave()
+        }
+
+        // 超时保护：到点仍未结束就终止子进程（管道随即 EOF，上面的读取循环会自然退出）
+        let killer = DispatchWorkItem { if proc.isRunning { proc.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
+
+        group.wait()
         proc.waitUntilExit()
-        let o = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let e = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return (proc.terminationStatus == 0, o + e)
+        killer.cancel()
+
+        lock.lock()
+        let o = String(data: outBuf, encoding: .utf8) ?? ""
+        let e = String(data: errBuf, encoding: .utf8) ?? ""
+        lock.unlock()
+
+        let text = o + e
+        if proc.terminationStatus == 0 { return (true, text) }
+        if Date().timeIntervalSince(startedAt) >= timeout - 0.5 {
+            return (false, "✗ 操作超时（超过 \(Int(timeout)) 秒已终止）\n" + text)
+        }
+        return (false, text)
     }
 
-    // 在远端执行命令；sudo=true 时需要管理员权限
-    func remote(_ command: String, sudo: Bool = false) -> (Bool, String) {
+    // 在远端执行命令；sudo=true 时需要管理员权限。
+    // command 里所有来自外部的路径/文件名，调用方必须先用 shellQuote() 包过。
+    func remote(_ command: String, sudo: Bool = false, timeout: TimeInterval = 300) -> (Bool, String) {
+        let ep = trimmedEndpoint(host: host, user: user, port: port)
         var a = sshArgs()
-        a.append("\(user)@\(host)")
+        a.append("\(ep.user)@\(ep.host)")
         let wrapped: String
         if sudo {
-            if !sudoPassword.isEmpty {
-                let safe = sudoPassword.replacingOccurrences(of: "'", with: "'\\''")
-                wrapped = "printf '%s\\n' '\(safe)' | sudo -S \(command)"
-            } else if !useKey && !password.isEmpty {
-                let safe = password.replacingOccurrences(of: "'", with: "'\\''")
-                wrapped = "printf '%s\\n' '\(safe)' | sudo -S \(command)"
-            } else {
-                wrapped = "sudo \(command)"
-            }
+            let pw = !sudoPassword.isEmpty ? sudoPassword : (!useKey ? password : "")
+            wrapped = pw.isEmpty
+                ? "sudo \(command)"
+                : "printf '%s\\n' \(shellQuote(pw)) | sudo -S \(command)"
         } else {
             wrapped = command
         }
         a.append(wrapped)
-        return run(launch: "/usr/bin/ssh", args: a, usePassword: !useKey)
+        return run(launch: "/usr/bin/ssh", args: a, usePassword: !useKey, timeout: timeout)
     }
 
-    func scpUp(local: String, remote: String) -> (Bool, String) {
+    // 远端路径不额外加引号：新版 scp 走 SFTP 协议，路径由 sftp-server 按字面处理，
+    // 额外转义反而会把反斜杠当真实字符。本地路径经 Process 参数直传，也不经 shell。
+    func scpUp(local: String, remote: String, timeout: TimeInterval = 1800) -> (Bool, String) {
+        let ep = trimmedEndpoint(host: host, user: user, port: port)
         var a = scpArgs()
         a.append(local)
-        a.append("\(user)@\(host):\(remote)")
-        return run(launch: "/usr/bin/scp", args: a, usePassword: !useKey)
+        a.append("\(ep.user)@\(ep.host):\(remote)")
+        return run(launch: "/usr/bin/scp", args: a, usePassword: !useKey, timeout: timeout)
     }
 
-    func scpDown(remote: String, local: String) -> (Bool, String) {
+    func scpDown(remote: String, local: String, timeout: TimeInterval = 1800) -> (Bool, String) {
+        let ep = trimmedEndpoint(host: host, user: user, port: port)
         var a = scpArgs()
-        a.append("\(user)@\(host):\(remote)")
+        a.append("\(ep.user)@\(ep.host):\(remote)")
         a.append(local)
-        return run(launch: "/usr/bin/scp", args: a, usePassword: !useKey)
+        return run(launch: "/usr/bin/scp", args: a, usePassword: !useKey, timeout: timeout)
     }
 
     func test() -> Bool {
-        append("· 测试连接 \(user)@\(host) ...")
-        let (ok, out) = remote("echo __ssh_ok__")
+        if let err = validateEndpoint(host: host, user: user, port: port) {
+            append("✗ \(err)")
+            connectionOK = false
+            return false
+        }
+        let ep = trimmedEndpoint(host: host, user: user, port: port)
+        append("· 测试连接 \(ep.user)@\(ep.host) ...")
+        let (ok, out) = remote("echo __ssh_ok__", timeout: 15)   // 连接测试不该久等
         connectionOK = ok
         if ok {
             append("✔ 连接成功")
@@ -192,65 +277,140 @@ final class SSHClient: ObservableObject {
         let name = (localPath as NSString).lastPathComponent
         let ext = (name as NSString).pathExtension.lowercased()
         append("▶ 开始安装:\(name)")
-        guard !host.isEmpty, !user.isEmpty else { append("✗ 请先填写主机与用户名"); return }
 
-        let tmpRemote = "/tmp/\(name)"
-        append("· 上传到目标机 \(tmpRemote) ...")
+        if let err = validateEndpoint(host: host, user: user, port: port) {
+            append("✗ \(err)")
+            return
+        }
+        guard ["app", "dmg", "pkg"].contains(ext) else {
+            append("✗ 不支持的格式:\(ext)(仅支持 .app/.dmg/.pkg)")
+            return
+        }
+
+        // 临时包名加 UUID，避免与远端 /tmp 下同名文件冲突
+        let tmpRemote = "/tmp/sshai_\(UUID().uuidString)_\(name)"
+        defer {
+            // 成功失败都清理远端临时包，不再出现失败分支漏删导致 /tmp 堆积
+            let _ = remote("rm -rf \(shellQuote(tmpRemote))", timeout: 60)
+        }
+
+        append("· 上传到目标机 ...")
         let (ok1, o1) = scpUp(local: localPath, remote: tmpRemote)
         if !ok1 { append("✗ 上传失败:\(o1)"); return }
 
-        if ext == "app" {
-            append("· 移除旧版本(若存在) ...")
-            let (okr, or) = remote("rm -rf '/Applications/\(name)'", sudo: true)
-            if !okr { append("⚠ 移除旧版本失败(可能权限不足):\(or)") }
-            append("· 复制到 /Applications ...")
-            let (ok2, o2) = remote("cp -R '\(tmpRemote)' '/Applications/'", sudo: true)
-            if !ok2 { append("✗ 复制失败:\(o2)"); return }
-            let (ok3, o3) = remote("xattr -dr com.apple.quarantine '/Applications/\(name)'", sudo: true)
-            if !ok3 { append("⚠ 去隔离标记失败(可能不影响运行):\(o3)") }
-            append("✔ 安装完成:/Applications/\(name)")
-            showToast("✔ 安装成功：\(name)")
-        } else if ext == "dmg" {
-            append("· 挂载 dmg ...")
-            let (okm, om) = remote("hdiutil attach '\(tmpRemote)' -nobrowse -mountpoint /tmp/dmgmount", sudo: false)
-            if !okm { append("✗ 挂载失败:\(om)"); return }
-            let (_, of) = remote("find /tmp/dmgmount -maxdepth 2 -name '*.app' | head -1")
-            let appInDmg = of.trimmingCharacters(in: .whitespacesAndNewlines)
-            if appInDmg.isEmpty { append("✗ dmg 内未找到 .app"); return }
-            let destName = (appInDmg as NSString).lastPathComponent
-            append("· 移除旧版本(若存在) ...")
-            let (okr2, or2) = remote("rm -rf '/Applications/\(destName)'", sudo: true)
-            if !okr2 { append("⚠ 移除旧版本失败(可能权限不足):\(or2)") }
-            append("· 复制 \(destName) 到 /Applications ...")
-            let (okc, oc) = remote("cp -R '\(appInDmg)' '/Applications/'", sudo: true)
-            if !okc { append("✗ 复制失败:\(oc)"); return }
-            let (okq, oq) = remote("xattr -dr com.apple.quarantine '/Applications/\(destName)'", sudo: true)
-            if !okq { append("⚠ 去隔离标记失败:\(oq)")
-            }
-            let _ = remote("hdiutil detach /tmp/dmgmount")
-            append("✔ 安装完成:/Applications/\(destName)")
-            showToast("✔ 安装成功：\(destName)")
-        } else if ext == "pkg" {
-            append("· 安装 pkg (installer -target /) ...")
-            let (okp, op) = remote("installer -pkg '\(tmpRemote)' -target / -allowUntrusted", sudo: true)
-            if !okp { append("✗ pkg 安装失败:\(op)"); return }
-            append("✔ pkg 安装完成")
-            showToast("✔ 安装成功：\(name)")
-        } else {
-            append("✗ 不支持的格式:\(ext)(仅支持 .app/.dmg/.pkg)")
+        switch ext {
+        case "app": installAppBundle(fromRemote: tmpRemote, name: name)
+        case "dmg": installDMG(fromRemote: tmpRemote)
+        default:    installPKG(fromRemote: tmpRemote, name: name)
         }
-        let _ = remote("rm -f '\(tmpRemote)'")
+    }
+
+    /// 把远端某处的 .app 原子地装进 /Applications：
+    /// 先复制到隐藏暂存区 → 旧版 mv 成备份 → 暂存区 mv 成正式名 → 成功才删备份。
+    /// 任何一步失败都回滚，绝不会出现「旧的删了、新的没装上」。
+    private func installAppBundle(fromRemote source: String, name: String) {
+        let dest = "/Applications/\(name)"
+        let staging = "/Applications/.sshai_staging_\(UUID().uuidString)"
+        let backup = "/Applications/.sshai_old_\(UUID().uuidString)"
+        var backupMade = false
+
+        defer { let _ = remote("rm -rf \(shellQuote(staging))", sudo: true, timeout: 120) }
+
+        append("· 清理暂存区 ...")
+        let (okClean, oClean) = remote("rm -rf \(shellQuote(staging))", sudo: true, timeout: 120)
+        if !okClean { append("⚠ 清理暂存区失败:\(oClean)") }
+
+        append("· 复制到 /Applications (暂存) ...")
+        let (okCopy, oCopy) = remote("cp -R \(shellQuote(source)) \(shellQuote(staging))", sudo: true, timeout: 900)
+        guard okCopy else {
+            append("✗ 暂存复制失败:\(oCopy)")
+            append("· 已中止，目标机上的原应用未被改动")
+            return
+        }
+
+        // 旧版本先移走而不是删除，保证失败可回滚
+        let (_, oExist) = remote("test -e \(shellQuote(dest)) && echo __EXIST__ || true", timeout: 60)
+        if oExist.contains("__EXIST__") {
+            append("· 移走旧版本(可回滚) ...")
+            let (okBackup, oBackup) = remote("rm -rf \(shellQuote(backup)) && mv \(shellQuote(dest)) \(shellQuote(backup))",
+                                             sudo: true, timeout: 300)
+            if okBackup { backupMade = true } else { append("⚠ 备份旧版本失败:\(oBackup)") }
+        }
+
+        append("· 就位 ...")
+        let (okMove, oMove) = remote("mv \(shellQuote(staging)) \(shellQuote(dest))", sudo: true, timeout: 300)
+        if !okMove {
+            append("✗ 就位失败:\(oMove)")
+            if backupMade {
+                append("· 回滚旧版本 ...")
+                let (okRoll, oRoll) = remote("mv \(shellQuote(backup)) \(shellQuote(dest))", sudo: true, timeout: 300)
+                if okRoll { append("✔ 已回滚，原应用完好") } else { append("✗ 回滚失败:\(oRoll)") }
+            }
+            return
+        }
+
+        let (okX, oX) = remote("xattr -dr com.apple.quarantine \(shellQuote(dest))", sudo: true, timeout: 300)
+        if !okX { append("⚠ 去隔离标记失败(可能不影响运行):\(oX)") }
+
+        if backupMade { let _ = remote("rm -rf \(shellQuote(backup))", sudo: true, timeout: 300) }
+        append("✔ 安装完成:\(dest)")
+        showToast("✔ 安装成功：\(name)")
+    }
+
+    /// 挂载 dmg 并把其中的 .app 交给 installAppBundle 原子安装。
+    /// 挂载点用随机路径，避免固定 /tmp/dmgmount 在异常退出后残留导致再也挂不上。
+    private func installDMG(fromRemote tmpRemote: String) {
+        let mount = "/tmp/sshai_dmg_\(UUID().uuidString)"
+        var mounted = false
+        defer {
+            if mounted { let _ = remote("hdiutil detach \(shellQuote(mount))", timeout: 180) }
+            let _ = remote("rmdir \(shellQuote(mount))", timeout: 60)
+        }
+
+        append("· 挂载 dmg ...")
+        let (okMk, oMk) = remote("mkdir -p \(shellQuote(mount))", timeout: 60)
+        if !okMk { append("⚠ 创建挂载点失败:\(oMk)") }
+        let (okm, om) = remote("hdiutil attach \(shellQuote(tmpRemote)) -nobrowse -mountpoint \(shellQuote(mount))",
+                               timeout: 300)
+        guard okm else { append("✗ 挂载失败:\(om)"); return }
+        mounted = true
+
+        // 优先取挂载根目录下的 .app，找不到再往下一层找
+        var appInDmg = ""
+        for depth in ["1", "2"] {
+            let (_, out) = remote("find \(shellQuote(mount)) -maxdepth \(depth) -name '*.app' -print 2>/dev/null | head -1",
+                                  timeout: 120)
+            let line = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !line.isEmpty { appInDmg = line; break }
+        }
+        if appInDmg.isEmpty { append("✗ dmg 内未找到 .app"); return }
+
+        append("· 找到 \(appInDmg)")
+        installAppBundle(fromRemote: appInDmg, name: (appInDmg as NSString).lastPathComponent)
+    }
+
+    private func installPKG(fromRemote tmpRemote: String, name: String) {
+        append("· 安装 pkg (installer -target /) ...")
+        let (okp, op) = remote("installer -pkg \(shellQuote(tmpRemote)) -target / -allowUntrusted",
+                               sudo: true, timeout: 1800)
+        if !okp { append("✗ pkg 安装失败:\(op)"); return }
+        append("✔ pkg 安装完成")
+        showToast("✔ 安装成功：\(name)")
     }
 
     // 通用文件传输
     func transfer(local: String, remote: String, download: Bool) {
-        guard !host.isEmpty, !user.isEmpty else { append("✗ 请先填写主机与用户名"); return }
+        if let err = validateEndpoint(host: host, user: user, port: port) {
+            append("✗ \(err)")
+            return
+        }
+        let ep = trimmedEndpoint(host: host, user: user, port: port)
         if download {
             append("▶ 下载 \(remote) → \(local)")
             let (ok, o) = scpDown(remote: remote, local: local)
             if ok { append("✔ 下载完成"); showToast("✔ 下载成功", target: .transferBox) } else { append("✗ 失败:\(o)") }
         } else {
-            let dest = remote.isEmpty ? "/Users/\(user)/Downloads/" : remote
+            let dest = remote.isEmpty ? "/Users/\(ep.user)/Downloads/" : remote
             append("▶ 上传 \(local) → \(dest)")
             let (ok, o) = scpUp(local: local, remote: dest)
             if ok { append("✔ 上传完成"); showToast("✔ 上传成功", target: .transferBox) } else { append("✗ 失败:\(o)") }
@@ -269,6 +429,14 @@ struct SSHAppInstallerApp: App {
                 .frame(minWidth: 760, minHeight: 600)
         }
         .windowResizability(.contentSize)
+        .commands {
+            // 标准「关于」面板：版本号与版权取自 Info.plist
+            CommandGroup(replacing: .appInfo) {
+                Button("关于 SSH App Installer") {
+                    NSApplication.shared.orderFrontStandardAboutPanel(options: [:])
+                }
+            }
+        }
     }
 }
 
@@ -337,14 +505,15 @@ struct ContentView: View {
                     .foregroundColor(client.connectionOK ? .green : .gray)
             }
             HStack(spacing: 10) {
-                TextField("主机 / IP", text: Binding(get: { client.host }, set: { client.host = $0 }))
+                // 连接参数一改，先前的连接成功状态立即作废（避免换主机后还显示绿勾）
+                TextField("主机 / IP", text: Binding(get: { client.host }, set: { client.host = $0; client.connectionOK = false }))
                     .textFieldStyle(.roundedBorder)
-                TextField("端口", text: Binding(get: { client.port }, set: { client.port = $0 }))
+                TextField("端口", text: Binding(get: { client.port }, set: { client.port = $0; client.connectionOK = false }))
                     .textFieldStyle(.roundedBorder).frame(width: 70)
-                TextField("用户名", text: Binding(get: { client.user }, set: { client.user = $0 }))
+                TextField("用户名", text: Binding(get: { client.user }, set: { client.user = $0; client.connectionOK = false }))
                     .textFieldStyle(.roundedBorder).frame(width: 120)
             }
-            Picker("认证方式", selection: Binding(get: { client.useKey }, set: { client.useKey = $0 })) {
+            Picker("认证方式", selection: Binding(get: { client.useKey }, set: { client.useKey = $0; client.connectionOK = false })) {
                 Text("SSH 密钥").tag(true)
                 Text("密码").tag(false)
             }
@@ -353,7 +522,7 @@ struct ContentView: View {
 
             if client.useKey {
                 HStack {
-                    TextField("密钥路径(默认 ~/.ssh/id_ed25519)", text: Binding(get: { client.keyPath }, set: { client.keyPath = $0 }))
+                    TextField("密钥路径(默认 ~/.ssh/id_ed25519)", text: Binding(get: { client.keyPath }, set: { client.keyPath = $0; client.connectionOK = false }))
                         .textFieldStyle(.roundedBorder)
                     Button("选择") {
                         if let p = chooseFile() { client.keyPath = p }
