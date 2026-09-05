@@ -258,6 +258,8 @@ struct ContentView: View {
     @State private var transferDownload: Bool = false
     @State private var showKeyPicker = false
     @State private var installViewMode: InstallViewMode = .icon
+    @State private var transferViewMode: InstallViewMode = .icon
+    @State private var droppedTransfers: [String] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -437,40 +439,114 @@ struct ContentView: View {
             .pickerStyle(.segmented)
             .frame(width: 280)
 
-            HStack {
-                if transferDownload {
-                    TextField("远端路径 (如 /tmp/a.txt)", text: $transferRemote).textFieldStyle(.roundedBorder)
-                } else {
-                    HStack {
-                        TextField("本机文件/文件夹", text: $transferLocal).textFieldStyle(.roundedBorder)
-                        Button("选择") { if let p = chooseFile(allowDir: true) { transferLocal = p } }
+            if transferDownload {
+                // 下载:远端路径 + 本机保存路径(远端文件无法拖入,用文本框)
+                TextField("远端路径 (如 /tmp/a.txt)", text: $transferRemote).textFieldStyle(.roundedBorder)
+                HStack {
+                    TextField("保存到本机路径", text: $transferLocal).textFieldStyle(.roundedBorder)
+                    Button("选择") { if let p = chooseFile(allowDir: true) { transferLocal = p } }
+                }
+            } else {
+                // 上传:拖入本机文件/文件夹(支持多个,图标/列表切换,x 删除)
+                HStack {
+                    Picker("", selection: $transferViewMode) {
+                        ForEach(InstallViewMode.allCases) { m in
+                            Text(m.rawValue).tag(m)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 160)
+                    Spacer()
+                    Button("选择文件") {
+                        if let p = chooseFile(allowDir: true) {
+                            if !droppedTransfers.contains(p) { droppedTransfers.append(p) }
+                        }
                     }
                 }
-            }
-            HStack {
-                if transferDownload {
-                    HStack {
-                        TextField("保存到本机路径", text: $transferLocal).textFieldStyle(.roundedBorder)
-                        Button("选择") { if let p = chooseFile(allowDir: true) { transferLocal = p } }
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color(nsColor: .tertiaryLabelColor), style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+                        .fill(Color(nsColor: .textBackgroundColor).opacity(0.4))
+                    VStack(spacing: 8) {
+                        if droppedTransfers.isEmpty {
+                            Image(systemName: "tray.and.arrow.down").font(.title).foregroundColor(.accentColor)
+                            Text("拖入本机文件/文件夹（可多个）").foregroundStyle(.secondary)
+                        } else {
+                            ScrollView {
+                                if transferViewMode == .icon {
+                                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 16)], spacing: 16) {
+                                        ForEach(droppedTransfers, id: \.self) { p in
+                                            DropItemView(path: p) { droppedTransfers.removeAll { $0 == p } }
+                                        }
+                                    }
+                                    .padding(12)
+                                } else {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        ForEach(droppedTransfers, id: \.self) { p in
+                                            HStack(spacing: 8) {
+                                                Image(nsImage: NSWorkspace.shared.icon(forFile: p))
+                                                    .resizable()
+                                                    .frame(width: 20, height: 20)
+                                                Text((p as NSString).lastPathComponent)
+                                                    .font(.caption)
+                                                    .lineLimit(1)
+                                                Spacer()
+                                                Button(action: { droppedTransfers.removeAll { $0 == p } }) {
+                                                    Image(systemName: "xmark.circle.fill")
+                                                        .font(.system(size: 15))
+                                                        .foregroundStyle(.secondary)
+                                                }
+                                                .buttonStyle(.plain)
+                                            }
+                                            .padding(.vertical, 2)
+                                        }
+                                    }
+                                    .padding(12)
+                                }
+                            }
+                            .frame(maxHeight: 162)
+                            HStack {
+                                Button("清除全部") { droppedTransfers.removeAll() }.font(.caption)
+                                Spacer()
+                            }
+                        }
                     }
-                } else {
-                    TextField("远端目标路径", text: $transferRemote, prompt: Text("默认 /Users/\(client.user)/Downloads/")).textFieldStyle(.roundedBorder)
+                    .padding(10)
                 }
+                .frame(height: 210)
+                .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+                    handleDrop(providers) { p in
+                        if !droppedTransfers.contains(p) { droppedTransfers.append(p) }
+                    }
+                    return true
+                }
+                TextField("远端目标路径", text: $transferRemote, prompt: Text("默认 /Users/\(client.user)/Downloads/")).textFieldStyle(.roundedBorder)
             }
             HStack {
                 Spacer()
                 Button(action: {
-                    guard !transferLocal.isEmpty, !transferRemote.isEmpty else { return }
-                    let l = transferLocal, r = transferRemote, d = transferDownload
-                    client.isBusy = true
-                    Task {
-                        client.transfer(local: l, remote: r, download: d)
-                        await MainActor.run { client.isBusy = false }
+                    if transferDownload {
+                        guard !transferLocal.isEmpty, !transferRemote.isEmpty else { return }
+                        let l = transferLocal, r = transferRemote, d = transferDownload
+                        client.isBusy = true
+                        Task {
+                            client.transfer(local: l, remote: r, download: d)
+                            await MainActor.run { client.isBusy = false }
+                        }
+                    } else {
+                        guard !droppedTransfers.isEmpty else { return }
+                        let items = droppedTransfers
+                        let r = transferRemote.isEmpty ? "/Users/\(client.user)/Downloads/" : transferRemote
+                        client.isBusy = true
+                        Task {
+                            for p in items { client.transfer(local: p, remote: r, download: false) }
+                            await MainActor.run { client.isBusy = false }
+                        }
                     }
                 }) {
-                    if client.isBusy { ProgressView().controlSize(.small) } else { Text(transferDownload ? "开始下载" : "开始上传").bold() }
+                    if client.isBusy { ProgressView().controlSize(.small) } else { Text(transferDownload ? "开始下载" : "开始上传（\(droppedTransfers.count)）").bold() }
                 }
-                .disabled(client.isBusy || transferLocal.isEmpty || transferRemote.isEmpty)
+                .disabled(client.isBusy || (transferDownload ? (transferLocal.isEmpty || transferRemote.isEmpty) : droppedTransfers.isEmpty))
                 .buttonStyle(.borderedProminent)
             }
         }
