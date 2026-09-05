@@ -275,6 +275,9 @@ struct ContentView: View {
     @State private var installViewMode: InstallViewMode = .icon
     @State private var transferViewMode: InstallViewMode = .icon
     @State private var droppedTransfers: [String] = []
+    @State private var showDirConfirm: Bool = false       // 下载文件夹二次确认
+    @State private var pendingDownloadRemote: String = ""
+    @State private var pendingDownloadLocal: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -468,7 +471,7 @@ struct ContentView: View {
 
             if transferDownload {
                 // 下载:远端路径 + 本机保存路径(远端文件无法拖入,用文本框)
-                TextField("远端路径 (如 /tmp/a.txt)", text: $transferRemote).textFieldStyle(.roundedBorder)
+                TextField("远端路径 (如 /tmp/a.txt)", text: $transferRemote, prompt: Text("默认 /Users/\(client.user)/Downloads/")).textFieldStyle(.roundedBorder)
                 HStack {
                     TextField("保存到本机路径", text: $transferLocal).textFieldStyle(.roundedBorder)
                     Button("选择") { if let p = chooseFile(allowDir: true) { transferLocal = p } }
@@ -554,11 +557,25 @@ struct ContentView: View {
                 Button(action: {
                     if transferDownload {
                         guard !transferLocal.isEmpty, !transferRemote.isEmpty else { return }
-                        let l = transferLocal, r = transferRemote, d = transferDownload
+                        let l = transferLocal, r = transferRemote
                         client.isBusy = true
                         Task {
-                            client.transfer(local: l, remote: r, download: d)
-                            await MainActor.run { client.isBusy = false }
+                            // 先判断远端路径是文件夹还是文件
+                            let safeR = r.replacingOccurrences(of: "'", with: "'\\''")
+                            let (okDir, outDir) = client.remote("test -d '\(safeR)' && echo __DIR__ || true")
+                            let isDir = okDir && outDir.contains("__DIR__")
+                            if isDir {
+                                // 文件夹:弹二次确认,询问是否下载全部
+                                await MainActor.run {
+                                    client.isBusy = false
+                                    pendingDownloadRemote = r
+                                    pendingDownloadLocal = l
+                                    showDirConfirm = true
+                                }
+                            } else {
+                                client.transfer(local: l, remote: r, download: true)
+                                await MainActor.run { client.isBusy = false }
+                            }
                         }
                     } else {
                         guard !droppedTransfers.isEmpty else { return }
@@ -585,7 +602,7 @@ struct ContentView: View {
             }
         }
         .onChange(of: transferDownload) {
-            if !transferDownload && transferRemote.isEmpty {
+            if transferRemote.isEmpty {
                 transferRemote = "/Users/\(client.user)/Downloads/"
             }
         }
@@ -593,6 +610,19 @@ struct ContentView: View {
             if transferRemote.hasPrefix("/Users/") && transferRemote.hasSuffix("/Downloads/") {
                 transferRemote = "/Users/\(client.user)/Downloads/"
             }
+        }
+        .alert("下载文件夹确认", isPresented: $showDirConfirm) {
+            Button("下载全部文件") {
+                let r = pendingDownloadRemote, l = pendingDownloadLocal
+                client.isBusy = true
+                Task {
+                    client.transfer(local: l, remote: r, download: true)
+                    await MainActor.run { client.isBusy = false }
+                }
+            }
+            Button("取消", role: .cancel) { }
+        } message: {
+            Text("远端路径是一个文件夹：\n\(pendingDownloadRemote)\n\n是否下载该文件夹内的所有文件？")
         }
     }
 
