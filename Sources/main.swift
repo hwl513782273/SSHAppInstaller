@@ -6,6 +6,9 @@ final class SSHClient: ObservableObject {
     @Published var isBusy: Bool = false
     @Published var log: String = ""
     @Published var connectionOK: Bool = false
+    @Published var toast: String? = nil   // 浮窗提示(成功时显示)
+
+    func showToast(_ s: String) { DispatchQueue.main.async { self.toast = s } }
 
     // 连接配置（均为内存态，密码不落盘）
     var host: String = ""
@@ -183,6 +186,7 @@ final class SSHClient: ObservableObject {
             let (ok3, o3) = remote("xattr -dr com.apple.quarantine '/Applications/\(name)'", sudo: true)
             if !ok3 { append("⚠ 去隔离标记失败(可能不影响运行):\(o3)") }
             append("✔ 安装完成:/Applications/\(name)")
+            showToast("✔ 安装成功：\(name)")
         } else if ext == "dmg" {
             append("· 挂载 dmg ...")
             let (okm, om) = remote("hdiutil attach '\(tmpRemote)' -nobrowse -mountpoint /tmp/dmgmount", sudo: false)
@@ -202,11 +206,13 @@ final class SSHClient: ObservableObject {
             }
             let _ = remote("hdiutil detach /tmp/dmgmount")
             append("✔ 安装完成:/Applications/\(destName)")
+            showToast("✔ 安装成功：\(destName)")
         } else if ext == "pkg" {
             append("· 安装 pkg (installer -target /) ...")
             let (okp, op) = remote("installer -pkg '\(tmpRemote)' -target / -allowUntrusted", sudo: true)
             if !okp { append("✗ pkg 安装失败:\(op)"); return }
             append("✔ pkg 安装完成")
+            showToast("✔ 安装成功：\(name)")
         } else {
             append("✗ 不支持的格式:\(ext)(仅支持 .app/.dmg/.pkg)")
         }
@@ -219,12 +225,12 @@ final class SSHClient: ObservableObject {
         if download {
             append("▶ 下载 \(remote) → \(local)")
             let (ok, o) = scpDown(remote: remote, local: local)
-            append(ok ? "✔ 下载完成" : "✗ 失败:\(o)")
+            if ok { append("✔ 下载完成"); showToast("✔ 下载成功") } else { append("✗ 失败:\(o)") }
         } else {
             let dest = remote.isEmpty ? "/Users/\(user)/Downloads/" : remote
             append("▶ 上传 \(local) → \(dest)")
             let (ok, o) = scpUp(local: local, remote: dest)
-            append(ok ? "✔ 上传完成" : "✗ 失败:\(o)")
+            if ok { append("✔ 上传完成"); showToast("✔ 上传成功") } else { append("✗ 失败:\(o)") }
         }
     }
 }
@@ -275,6 +281,20 @@ struct ContentView: View {
             logSection
         }
         .padding(16)
+        .overlay(alignment: .bottom) {
+            if let msg = client.toast {
+                ToastView(message: msg)
+                    .padding(.bottom, 18)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: client.toast)
+        .onReceive(client.$toast) { _ in
+            guard client.toast != nil else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) {
+                if client.toast != nil { client.toast = nil }
+            }
+        }
     }
 
     // MARK: 连接配置
@@ -656,6 +676,31 @@ struct ContentView: View {
                 }
             }
             .onHover { hovered = $0 }
+        }
+    }
+
+    // MARK: 成功浮窗
+    private struct ToastView: View {
+        let message: String
+        var body: some View {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.title3)
+                Text(message)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .background(
+                Capsule()
+                    .fill(Color(nsColor: .windowBackgroundColor).opacity(0.96))
+                    .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
+            )
+            .overlay(
+                Capsule().stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
+            )
         }
     }
 }
