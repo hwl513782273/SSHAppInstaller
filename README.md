@@ -67,7 +67,7 @@ bash make_dmg.sh
 
 ### macOS 版本选择
 
-- **Apple Silicon（M1 及更新）— 推荐**：下载 `15-SSHAppInstaller-1.0-beta4-universal.dmg`（当前版本为 arm64 构建，macOS 12+ 可运行）。
+- **Apple Silicon（M1 及更新）— 推荐**：下载 `15-SSHAppInstaller-1.0-universal.dmg`（当前版本为 arm64 构建，macOS 12+ 可运行）。
 - **Intel Mac**：当前版本未内置 x86_64 产物，请从源码构建（`swiftc` 支持 `--target x86_64-apple-macos12` 交叉编译）。
 
 > DMG 为 ad-hoc 签名、**未公证（notarized）**，首次打开请右键「打开」放行 Gatekeeper。
@@ -135,7 +135,7 @@ bash make_dmg.sh
 
 ### Choose a macOS build
 
-- **Apple Silicon (M1 or newer) — Recommended**: download `15-SSHAppInstaller-1.0-beta4-universal.dmg` (arm64 build, runs on macOS 12+).
+- **Apple Silicon (M1 or newer) — Recommended**: download `15-SSHAppInstaller-1.0-universal.dmg` (arm64 build, runs on macOS 12+).
 - **Intel Mac**: no prebuilt x86_64 artifact yet; please build from source (`swiftc --target x86_64-apple-macos12`).
 
 > The DMG is ad-hoc signed and **not notarized**. Right-click → Open on first launch to pass Gatekeeper.

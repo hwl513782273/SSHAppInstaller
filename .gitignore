@@ -2,3 +2,9 @@ build/
 staging/
 *.dmg
 .DS_Store
+
+# 内部产物,不入库(2026-09-06 规则:只上传必要文件,自检报告不上传)
+自检报告*
+*_自检报告*.html
+README-demo*
+new_icon/
