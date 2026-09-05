@@ -1,14 +1,23 @@
 import SwiftUI
 import AppKit
 
+// MARK: - 成功浮窗类型（决定浮窗显示位置）
+enum ToastTarget { case window, transferBox }
+struct ToastInfo: Equatable {
+    let message: String
+    let target: ToastTarget
+}
+
 // MARK: - SSH 执行核心
 final class SSHClient: ObservableObject {
     @Published var isBusy: Bool = false
     @Published var log: String = ""
     @Published var connectionOK: Bool = false
-    @Published var toast: String? = nil   // 浮窗提示(成功时显示)
+    @Published var toast: ToastInfo? = nil   // 成功浮窗(含显示位置)
 
-    func showToast(_ s: String) { DispatchQueue.main.async { self.toast = s } }
+    func showToast(_ s: String, target: ToastTarget = .window) {
+        DispatchQueue.main.async { self.toast = ToastInfo(message: s, target: target) }
+    }
 
     // 连接配置（均为内存态，密码不落盘）
     var host: String = ""
@@ -225,12 +234,12 @@ final class SSHClient: ObservableObject {
         if download {
             append("▶ 下载 \(remote) → \(local)")
             let (ok, o) = scpDown(remote: remote, local: local)
-            if ok { append("✔ 下载完成"); showToast("✔ 下载成功") } else { append("✗ 失败:\(o)") }
+            if ok { append("✔ 下载完成"); showToast("✔ 下载成功", target: .transferBox) } else { append("✗ 失败:\(o)") }
         } else {
             let dest = remote.isEmpty ? "/Users/\(user)/Downloads/" : remote
             append("▶ 上传 \(local) → \(dest)")
             let (ok, o) = scpUp(local: local, remote: dest)
-            if ok { append("✔ 上传完成"); showToast("✔ 上传成功") } else { append("✗ 失败:\(o)") }
+            if ok { append("✔ 上传完成"); showToast("✔ 上传成功", target: .transferBox) } else { append("✗ 失败:\(o)") }
         }
     }
 }
@@ -282,7 +291,7 @@ struct ContentView: View {
         }
         .padding(16)
         .overlay(alignment: .bottom) {
-            if let msg = client.toast {
+            if client.toast?.target == .window, let msg = client.toast?.message {
                 ToastView(message: msg)
                     .padding(.bottom, 18)
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
@@ -571,6 +580,12 @@ struct ContentView: View {
             }
         }
         .padding(12)
+        .overlay(alignment: .center) {
+            if client.toast?.target == .transferBox, let msg = client.toast?.message {
+                ToastView(message: msg)
+                    .transition(.opacity.combined(with: .scale))
+            }
+        }
         .onChange(of: transferDownload) {
             if !transferDownload && transferRemote.isEmpty {
                 transferRemote = "/Users/\(client.user)/Downloads/"
