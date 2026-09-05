@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>SSHAppInstaller v1.0-beta4 自检报告</title>
+<style>
+:root{ --bg:#0f1115; --card:#1a1d24; --line:#2a2f3a; --ok:#2ecc71; --warn:#f1c40f; --bad:#e74c3c; --txt:#e6e9ef; --sub:#9aa3b2; }
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;padding:28px;}
+h1{font-size:22px;margin:0 0 4px}
+.meta{color:var(--sub);font-size:13px;margin-bottom:20px}
+.banner{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:22px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 18px;min-width:130px}
+.stat .n{font-size:26px;font-weight:700}
+.stat .l{color:var(--sub);font-size:12px;margin-top:2px}
+.ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:18px}
+section h2{font-size:16px;margin:0 0 12px;display:flex;justify-content:space-between;align-items:center}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}
+th{color:var(--sub);font-weight:600}
+td.s{font-weight:700;white-space:nowrap}
+.tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px}
+.t-ok{background:rgba(46,204,113,.15);color:var(--ok)}
+.t-warn{background:rgba(241,196,15,.15);color:var(--warn)}
+footer{color:var(--sub);font-size:12px;margin-top:8px}
+code{background:#0b0d11;padding:1px 6px;border-radius:5px;font-size:12px}
+</style>
+</head>
+<body>
+
+<h1>SSHAppInstaller 安全加固自检报告</h1>
+<div class="meta">
+  版本 <b>v1.0-beta4</b> ｜ 交付文件 <code>15-SSHAppInstaller-1.0-beta4-universal.dmg</code> ｜
+  自检时间 2026-09-06 03:30 ｜ 平台 macOS 15.7.8 · arm64 ｜ commit <code>259e5be</code>
+</div>
+
+<div class="banner">
+  <div class="stat"><div class="n ok">23/23</div><div class="l">自测用例通过</div></div>
+  <div class="stat"><div class="n ok">5/5</div><div class="l">P0 修复</div></div>
+  <div class="stat"><div class="n ok">7/7</div><div class="l">P1 修复</div></div>
+  <div class="stat"><div class="n ok">2/2</div><div class="l">P2 规范</div></div>
+  <div class="stat"><div class="n ok">0</div><div class="l">失败项</div></div>
+  <div class="stat"><div class="n warn">1</div><div class="l">待真机补测项</div></div>
+</div>
+
+<section>
+  <h2>源码逻辑层 <span class="tag t-ok">PASS</span></h2>
+  <table>
+    <tr><th>模块</th><th>检查项</th><th>结论</th></tr>
+    <tr><td>ShellQuote.swift</td><td>shellQuote 转义：普通名 / Bob's App.app / 空格 / $() / 反引号 / 分号 / 空串（7 项单测）</td><td class="s ok">PASS</td></tr>
+    <tr><td>ShellQuote.swift</td><td>转义语义：真跑 /bin/sh 往返，输出与原文一致，注入命令未被执行（3 项）</td><td class="s ok">PASS</td></tr>
+    <tr><td>ShellQuote.swift</td><td>validateEndpoint：空主机/空用户名/非法字符/端口 abc·0·99999 均拒；首尾空白容忍（10 项）</td><td class="s ok">PASS</td></tr>
+    <tr><td>main.swift · run()</td><td>管道死锁修复：并发抽干 out/err 后再 waitUntilExit，293KB 输出 0.07s 读完、300300 字节完整</td><td class="s ok">PASS</td></tr>
+    <tr><td>main.swift · run()</td><td>对照实验：修复前写法（先 wait 后 read）5 秒内子进程未退出，死锁确证存在且已被修掉</td><td class="s ok">PASS</td></tr>
+    <tr><td>main.swift · run()</td><td>分层超时（600s / test 15s / scp 1800s），超时 terminate 并报明确错误</td><td class="s ok">PASS*</td></tr>
+    <tr><td>main.swift · askpass</td><td>UUID 随机目录 0700 + 脚本 0700，创建失败明确报错（不再 try? 吞错），deinit 清理</td><td class="s ok">PASS*</td></tr>
+    <tr><td>main.swift · install</td><td>原子替换：暂存 → 旧版 mv 备份 → 就位 → 成功删备份；任一步失败回滚</td><td class="s ok">PASS*</td></tr>
+    <tr><td>main.swift · installDMG</td><td>随机挂载点 + defer detach；.app 查找 maxdepth 1 优先退 2；defer 清理远端临时包</td><td class="s ok">PASS*</td></tr>
+    <tr><td>main.swift · UI</td><td>连接参数任一变更立即重置 connectionOK；日志限长 20000 字符</td><td class="s ok">PASS</td></tr>
+  </table>
+  <footer>带 * 项为代码级 + 单元级验证，完整链路待真机补测（见功能清单）。</footer>
+</section>
+
+<section>
+  <h2>已交付产物校验 <span class="tag t-ok">6/6</span></h2>
+  <table>
+    <tr><th>检查项</th><th>方法</th><th>结果</th></tr>
+    <tr><td>编译</td><td>swiftc -O · build.sh</td><td class="s ok">零错零警 · arm64 ✓</td></tr>
+    <tr><td>签名</td><td>codesign -dv</td><td class="s ok">adhoc ✓</td></tr>
+    <tr><td>安装与启动</td><td>/Applications + lsregister + open</td><td class="s ok">存活 PID 19513 ✓</td></tr>
+    <tr><td>「关于」面板</td><td>grep -a UTF-8 中文串 + 符号表查 orderFrontStandardAboutPanel</td><td class="s ok">均已编译进二进制 ✓</td></tr>
+    <tr><td>版权</td><td>defaults read Info.plist</td><td class="s ok">Copyright © 2026 banqiu. Released under the MIT License. ✓</td></tr>
+    <tr><td>DMG 一致性</td><td>挂载自检 + md5 三处比对</td><td class="s ok">.app/替身正确 · ce4d3590… 三处一致 ✓</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>功能清单对照 <span class="tag t-ok">11 OK · 2 待办</span></h2>
+  <table>
+    <tr><th>功能</th><th>状态</th></tr>
+    <tr><td>shellQuote 全量转义（远端命令注入防护）</td><td class="s ok">OK</td></tr>
+    <tr><td>管道死锁修复 + 对照实验证明</td><td class="s ok">OK</td></tr>
+    <tr><td>分层超时防卡死</td><td class="s ok">OK</td></tr>
+    <tr><td>askpass 随机 0700 目录（CWE-377 加固）</td><td class="s ok">OK</td></tr>
+    <tr><td>安装原子替换 + 失败回滚</td><td class="s ok">OK</td></tr>
+    <tr><td>dmg 随机挂载点 + defer 清理</td><td class="s ok">OK</td></tr>
+    <tr><td>host/user/port 参数校验</td><td class="s ok">OK</td></tr>
+    <tr><td>connectionOK 变更重置</td><td class="s ok">OK</td></tr>
+    <tr><td>日志限长</td><td class="s ok">OK</td></tr>
+    <tr><td>「关于」界面 + 版权修正</td><td class="s ok">OK</td></tr>
+    <tr><td>历史产物保留（6 个 DMG 未覆盖）</td><td class="s ok">OK</td></tr>
+    <tr><td>SSH 端到端连通（连接/上传/下载/安装真机链路）</td><td class="s warn">待真机</td></tr>
+    <tr><td>远端文件浏览器（另案任务 #7-#11）</td><td class="s warn">未开工</td></tr>
+  </table>
+</section>
+
+<footer>
+  结论：源码级与单元级自检全部通过（23/23），无失败项；唯一待办是 SSH 端到端真机链路
+  （本机未开启远程登录，未擅自开启系统服务，待用户确认后补测）。真机确认 OK 后去掉 -beta 定正式版。
+</footer>
+
+</body>
+</html>
