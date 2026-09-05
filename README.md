@@ -1,10 +1,17 @@
 # SSHAppInstaller / SSH 应用安装器
 
-> 一款原生 macOS 图形化工具：填一次 SSH 信息，就能把 `.app` / `.dmg` / `.pkg` 拖拽安装到另一台 Mac 的 /Applications，附带双向传文件，类似「跨 Mac 的应用安装器」。/ A native macOS GUI that installs `.app` / `.dmg` / `.pkg` onto another Mac over SSH with drag-and-drop, plus two-way file transfer — like a cross-Mac app installer.
+> 一款原生 macOS 图形化工具：填一次 SSH 信息，就能把 `.app` / `.dmg` / `.pkg` 拖拽安装到另一台 Mac 的 /Applications，附带双向传文件，类似「跨 Mac 的应用安装器」。
+> A native macOS GUI that installs `.app` / `.dmg` / `.pkg` onto another Mac over SSH with drag-and-drop, plus two-way file transfer — like a cross-Mac app installer.
 
-> **作者 Author：banqiu** **许可证 License：MIT**（详见 LICENSE）。可自由使用、修改与再分发，须保留版权与许可声明。
+> **作者 Author：banqiu**
+>
+> **许可证 License：MIT**（详见 [LICENSE](https://github.com/hwl513782273/SSHAppInstaller/blob/main/LICENSE)）。可自由使用、修改与再分发，须保留版权与许可声明。
+
+![SSHAppInstaller 图标](app-icon.png)
 
 [下载最新版 / Download](https://github.com/hwl513782273/SSHAppInstaller/releases/latest) · [问题反馈 / Issues](https://github.com/hwl513782273/SSHAppInstaller/issues)
+
+---
 
 ## 中文
 
@@ -17,9 +24,11 @@
 - 双认证方式：SSH 密钥（含自定义密钥路径）或密码二选一；写 `/Applications` 需要的 sudo 密码单独输入，仅驻留内存、从不落盘。
 - 全程日志可视化：每一步（上传 / 挂载 / 复制 / 去隔离）都写进日志区并自动滚动，成功与失败都有浮窗提示。
 
+> **平台说明 Platform Note：本工具为 macOS 原生应用（SwiftUI + AppKit，swiftc 直接编译并打包为 `.app` / `.dmg`），暂无 Windows / Linux 版本。**
+
 ### 快速开始
 
-1. 在 Releases 下载对应系统的 DMG（见下方「macOS 版本选择」）。
+1. 在 [Releases](https://github.com/hwl513782273/SSHAppInstaller/releases/latest) 下载对应系统的 DMG（见下方「macOS 版本选择」）。
 2. 打开 DMG，把 `SSHAppInstaller.app` 拖入「应用程序」。
 3. 首次打开：右键 → 打开（或终端执行 `xattr -dr com.apple.quarantine /Applications/SSHAppInstaller.app`）。
 4. 填好目标机的主机 / 用户名并测试连接，然后把安装包拖进「安装软件」页，点「安装到远端」。
@@ -45,7 +54,7 @@ bash make_dmg.sh
 
 > DMG 为 ad-hoc 签名、**未公证（notarized）**，首次打开请右键「打开」放行 Gatekeeper。
 
-> 仓库「发行版 / Releases」的命名格式为：`支持最低版本-{软件英文名}-版本-架构`。第一段数字为该包实际支持的最低 macOS 版本号。
+> 仓库「发行版 / Releases」的命名格式为：`支持最低版本-SSHAppInstaller-版本-架构`。第一段数字为该包实际支持的最低 macOS 版本号。
 
 ### 支持的功能
 
@@ -83,9 +92,11 @@ bash make_dmg.sh
 - Two auth modes: SSH key (custom path supported) or password; the sudo password required for /Applications is entered separately and never written to disk.
 - Full log visibility: every step (upload / mount / copy / quarantine removal) is logged with auto-scrolling, plus toast notifications for success and failure.
 
+> **Platform Note: this is a native macOS app (SwiftUI + AppKit, compiled with swiftc and packaged as `.app` / `.dmg`). There is no Windows / Linux build.**
+
 ### Quick start
 
-1. Download the DMG for your system from Releases (see "Choose a macOS build" below).
+1. Download the DMG for your system from [Releases](https://github.com/hwl513782273/SSHAppInstaller/releases/latest) (see "Choose a macOS build" below).
 2. Open the DMG and drag `SSHAppInstaller.app` into "Applications".
 3. First launch: right-click → Open (or run `xattr -dr com.apple.quarantine /Applications/SSHAppInstaller.app`).
 4. Fill in the target Mac's host / username and test the connection, then drop installers into the Install tab and click the install button.
