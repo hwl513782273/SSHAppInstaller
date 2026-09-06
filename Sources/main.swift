@@ -9,6 +9,13 @@ struct ToastInfo: Equatable {
     let id = UUID()      // 每条提示唯一,确保 SwiftUI 一定识别为变化并重播动画
 }
 
+// MARK: - 远端文件条目（浏览器用）
+struct RemoteEntry: Identifiable, Equatable {
+    let name: String
+    let isDir: Bool
+    var id: String { name }
+}
+
 // MARK: - SSH 执行核心
 final class SSHClient: ObservableObject {
     @Published var isBusy: Bool = false
@@ -398,6 +405,28 @@ final class SSHClient: ObservableObject {
         showToast("✔ 安装成功：\(name)")
     }
 
+    /// 远端目录列举：cd 进目标目录后用 pwd 取真实绝对路径（支持 "~"、"."、相对路径等输入），
+    /// 再用 `ls -1Ap` 列举（-1 单列 / -A 含隐藏 / -p 目录带 / 后缀，POSIX 选项，macOS/Linux 通用）。
+    /// 返回 (是否成功, 条目列表, 真实绝对路径, 错误信息)。
+    func remoteList(_ path: String) -> (Bool, [RemoteEntry], String, String) {
+        let cmd = "cd \(shellQuote(path)) 2>/dev/null && echo __PWD__$(pwd) && ls -1Ap"
+        let (ok, out) = remote(cmd, timeout: 30)
+        guard ok else { return (false, [], "", out) }
+        var realPath = path
+        var entries: [RemoteEntry] = []
+        for line in out.components(separatedBy: "\n") {
+            guard !line.isEmpty else { continue }
+            if line.hasPrefix("__PWD__") {
+                realPath = String(line.dropFirst("__PWD__".count))
+            } else if line.hasSuffix("/") {
+                entries.append(RemoteEntry(name: String(line.dropLast()), isDir: true))
+            } else {
+                entries.append(RemoteEntry(name: line, isDir: false))
+            }
+        }
+        return (true, entries, realPath, "")
+    }
+
     // 通用文件传输
     func transfer(local: String, remote: String, download: Bool) {
         if let err = validateEndpoint(host: host, user: user, port: port) {
@@ -414,6 +443,166 @@ final class SSHClient: ObservableObject {
             append("▶ 上传 \(local) → \(dest)")
             let (ok, o) = scpUp(local: local, remote: dest)
             if ok { append("✔ 上传完成"); showToast("✔ 上传成功", target: .transferBox) } else { append("✗ 失败:\(o)") }
+        }
+    }
+}
+
+// MARK: - 远端文件浏览器（Sheet：文件/文件夹都能选，双击文件夹进入）
+private struct RemoteFileBrowser: View {
+    let client: SSHClient
+    @Binding var selectedPath: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var currentPath = ""
+    @State private var entries: [RemoteEntry] = []
+    @State private var selection: RemoteEntry? = nil
+    @State private var loading = false
+    @State private var errorText = ""
+    @State private var pathInput = ""
+    @State private var loadSeq = 0     // 防乱序：快速连点"前往/上级"时只采纳最后一次请求的结果
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack {
+                Text("远端文件浏览").font(.headline)
+                Spacer()
+                Button("关闭") { dismiss() }
+            }
+            HStack(spacing: 8) {
+                TextField("远端路径", text: $pathInput)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { load(pathInput) }
+                Button("前往") { load(pathInput) }
+                Button { up() } label: { Image(systemName: "chevron.up") }
+                    .help("上级目录")
+                Button { load(currentPath) } label: { Image(systemName: "arrow.clockwise") }
+                    .help("刷新")
+                    .disabled(currentPath.isEmpty || loading)
+            }
+            ZStack {
+                if loading {
+                    ProgressView("加载中 ...")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if !errorText.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.title)
+                            .foregroundStyle(.yellow)
+                        Text(errorText)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                        Button("重试") { load(pathInput) }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if entries.isEmpty {
+                    Text("（空目录）").foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        ForEach(sortedEntries) { e in
+                            HStack(spacing: 8) {
+                                Image(systemName: e.isDir ? "folder.fill" : "doc")
+                                    .foregroundStyle(e.isDir ? Color.accentColor : Color.secondary)
+                                    .frame(width: 20)
+                                Text(e.name)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                if selection == e {
+                                    Image(systemName: "checkmark")
+                                        .foregroundStyle(Color.accentColor)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture(count: 1) { selection = e }
+                            .onTapGesture(count: 2) {
+                                if e.isDir { load(join(currentPath, e.name)) }
+                            }
+                        }
+                    }
+                    .listStyle(.inset)
+                }
+            }
+            .frame(minHeight: 300)
+            HStack {
+                Text(hint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Button("取消") { dismiss() }
+                Button("选择") {
+                    selectedPath = selection.map { join(currentPath, $0.name) } ?? currentPath
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(currentPath.isEmpty || loading)
+            }
+        }
+        .padding(16)
+        .frame(width: 560, height: 480)
+        .onAppear { initialLoad() }
+    }
+
+    private var sortedEntries: [RemoteEntry] {
+        entries.sorted {
+            if $0.isDir != $1.isDir { return $0.isDir }
+            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+    }
+
+    private var hint: String {
+        if let e = selection {
+            return "已选中\(e.isDir ? "文件夹" : "文件")：\(e.name)"
+        }
+        return "未选中时「选择」将使用当前目录"
+    }
+
+    private func join(_ dir: String, _ name: String) -> String {
+        dir.hasSuffix("/") ? dir + name : dir + "/" + name
+    }
+
+    // 初始目录：已有输入像文件（带扩展名）则落到其父目录；为空则落到远端家目录(".")
+    private func initialLoad() {
+        let r = selectedPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        var start = r
+        if !r.isEmpty, r != "/", !(r as NSString).pathExtension.isEmpty {
+            start = (r as NSString).deletingLastPathComponent
+        }
+        if start.isEmpty { start = "." }
+        load(start)
+    }
+
+    private func up() {
+        let parent = (currentPath as NSString).deletingLastPathComponent
+        load(parent.isEmpty ? "/" : parent)
+    }
+
+    private func load(_ p: String) {
+        let target = p.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return }
+        loadSeq += 1
+        let seq = loadSeq
+        selection = nil
+        errorText = ""
+        loading = true
+        pathInput = target
+        Task {
+            let (ok, list, realPath, err) = client.remoteList(target)
+            await MainActor.run {
+                guard seq == loadSeq else { return }
+                loading = false
+                if ok {
+                    currentPath = realPath
+                    pathInput = realPath
+                    entries = list
+                } else {
+                    errorText = err.isEmpty ? "无法访问 \(target)" : "✗ \(err)"
+                    currentPath = ""
+                    entries = []
+                }
+            }
         }
     }
 }
@@ -460,6 +649,7 @@ struct ContentView: View {
     @State private var showDirConfirm: Bool = false       // 下载文件夹二次确认
     @State private var pendingDownloadRemote: String = ""
     @State private var pendingDownloadLocal: String = ""
+    @State private var showRemoteBrowser: Bool = false    // 远端文件浏览器
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -647,8 +837,11 @@ struct ContentView: View {
             .frame(width: 280)
 
             if transferDownload {
-                // 下载:远端路径 + 本机保存路径(远端文件无法拖入,用文本框)
-                TextField("远端路径 (如 /tmp/a.txt)", text: $transferRemote, prompt: Text("默认 /Users/\(client.user)/Downloads/")).textFieldStyle(.roundedBorder)
+                // 下载:远端路径 + 本机保存路径(远端文件可文本输入或点「浏览」图形化选择)
+                HStack {
+                    TextField("远端路径 (如 /tmp/a.txt)", text: $transferRemote, prompt: Text("默认 /Users/\(client.user)/Downloads/")).textFieldStyle(.roundedBorder)
+                    Button("浏览") { showRemoteBrowser = true }
+                }
                 HStack {
                     TextField("保存到本机路径", text: $transferLocal).textFieldStyle(.roundedBorder)
                     Button("选择") { if let p = chooseFile(allowDir: true) { transferLocal = p } }
@@ -727,7 +920,10 @@ struct ContentView: View {
                     }
                     return true
                 }
-                TextField("远端目标路径", text: $transferRemote, prompt: Text("默认 /Users/\(client.user)/Downloads/")).textFieldStyle(.roundedBorder)
+                HStack {
+                    TextField("远端目标路径", text: $transferRemote, prompt: Text("默认 /Users/\(client.user)/Downloads/")).textFieldStyle(.roundedBorder)
+                    Button("浏览") { showRemoteBrowser = true }
+                }
             }
             HStack {
                 Spacer()
@@ -801,6 +997,9 @@ struct ContentView: View {
             Button("取消", role: .cancel) { }
         } message: {
             Text("远端路径是一个文件夹：\n\(pendingDownloadRemote)\n\n是否下载该文件夹内的所有文件？")
+        }
+        .sheet(isPresented: $showRemoteBrowser) {
+            RemoteFileBrowser(client: client, selectedPath: $transferRemote)
         }
     }
 
