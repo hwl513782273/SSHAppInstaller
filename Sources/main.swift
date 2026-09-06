@@ -514,10 +514,11 @@ private struct RemoteFileBrowser: View {
                                 }
                             }
                             .contentShape(Rectangle())
-                            .onTapGesture(count: 1) { selection = e }
+                            // 顺序关键：双击手势必须写在单击之前，否则单击会先吞掉双击导致进不了文件夹
                             .onTapGesture(count: 2) {
                                 if e.isDir { load(join(currentPath, e.name)) }
                             }
+                            .onTapGesture(count: 1) { selection = e }
                         }
                     }
                     .listStyle(.inset)
@@ -627,7 +628,7 @@ struct SSHAppInstallerApp: App {
                 .frame(width: size.w, height: size.h)
                 .frame(minWidth: 760, minHeight: 600)
         }
-        .windowResizability(.contentSize)
+        // .windowResizability 是 macOS 13+ API，为兼容 12 不使用
         .commands {
             // 标准「关于」面板：版本号与版权取自 Info.plist
             CommandGroup(replacing: .appInfo) {
@@ -750,73 +751,7 @@ struct ContentView: View {
     private var installTab: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("把 .app / .dmg / .pkg 拖到下方,或点「选择文件」,再点「安装到远端」").font(.subheadline).foregroundStyle(.secondary)
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 1.5, dash: [6, 5]))
-                .fill(Color.accentColor.opacity(0.06))
-                .frame(height: 210)
-                .overlay(
-                    VStack(spacing: 8) {
-                        if droppedInstalls.isEmpty {
-                            Image(systemName: "tray.and.arrow.down").font(.title).foregroundColor(.accentColor)
-                            Text("拖入软件包（可多个）").foregroundStyle(.secondary)
-                        } else {
-                            HStack(spacing: 8) {
-                                Picker("显示模式", selection: $installViewMode) {
-                                    ForEach(InstallViewMode.allCases) { m in
-                                        Text(m.rawValue).tag(m)
-                                    }
-                                }
-                                .pickerStyle(.segmented)
-                                .frame(width: 150)
-                                Spacer()
-                                Button("清除全部") { droppedInstalls.removeAll() }.font(.caption)
-                            }
-                            if installViewMode == .icon {
-                                ScrollView {
-                                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 16)], spacing: 16) {
-                                        ForEach(droppedInstalls, id: \.self) { p in
-                                            DropItemView(path: p) {
-                                                droppedInstalls.removeAll { $0 == p }
-                                            }
-                                        }
-                                    }
-                                    .padding(12)
-                                }
-                                .frame(maxHeight: 140)
-                            } else {
-                                ScrollView {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        ForEach(droppedInstalls, id: \.self) { p in
-                                            HStack(spacing: 8) {
-                                                Image(nsImage: NSWorkspace.shared.icon(forFile: p))
-                                                    .resizable()
-                                                    .frame(width: 20, height: 20)
-                                                Text((p as NSString).lastPathComponent)
-                                                    .font(.caption)
-                                                    .lineLimit(1)
-                                                Spacer()
-                                                Button(action: { droppedInstalls.removeAll { $0 == p } }) {
-                                                    Image(systemName: "xmark.circle.fill")
-                                                        .font(.system(size: 15))
-                                                        .foregroundStyle(.secondary)
-                                                }
-                                                .buttonStyle(.plain)
-                                            }
-                                            .padding(.vertical, 2)
-                                        }
-                                    }
-                                    .padding(12)
-                                }
-                                .frame(maxHeight: 140)
-                            }
-                        }
-                    }
-                    .padding(10)
-                )
-                .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-                    handleDrop(providers) { addInstallFile($0) }
-                    return true
-                }
+            installDropZone
             HStack {
                 Button("选择文件") {
                     if let p = chooseFile() { addInstallFile(p) }
@@ -838,6 +773,80 @@ struct ContentView: View {
             }
         }
         .padding(12)
+    }
+
+    // 安装页拖放区（独立成子视图，避免巨型表达式拖慢编译）
+    private var installDropZone: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.accentColor.opacity(0.06))
+            // 兼容 macOS 12：带样式描边用旧 API stroke(style:)+foregroundColor
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(style: StrokeStyle(lineWidth: 1.5, dash: [6, 5]))
+                .foregroundColor(Color.accentColor)
+            VStack(spacing: 8) {
+                if droppedInstalls.isEmpty {
+                    Image(systemName: "tray.and.arrow.down").font(.title).foregroundColor(.accentColor)
+                    Text("拖入软件包（可多个）").foregroundStyle(.secondary)
+                } else {
+                    HStack(spacing: 8) {
+                        Picker("显示模式", selection: $installViewMode) {
+                            ForEach(InstallViewMode.allCases) { m in
+                                Text(m.rawValue).tag(m)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 150)
+                        Spacer()
+                        Button("清除全部") { droppedInstalls.removeAll() }.font(.caption)
+                    }
+                    if installViewMode == .icon {
+                        ScrollView {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 16)], spacing: 16) {
+                                ForEach(droppedInstalls, id: \.self) { p in
+                                    DropItemView(path: p) {
+                                        droppedInstalls.removeAll { $0 == p }
+                                    }
+                                }
+                            }
+                            .padding(12)
+                        }
+                        .frame(maxHeight: 140)
+                    } else {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(droppedInstalls, id: \.self) { p in
+                                    HStack(spacing: 8) {
+                                        Image(nsImage: NSWorkspace.shared.icon(forFile: p))
+                                            .resizable()
+                                            .frame(width: 20, height: 20)
+                                        Text((p as NSString).lastPathComponent)
+                                            .font(.caption)
+                                            .lineLimit(1)
+                                        Spacer()
+                                        Button(action: { droppedInstalls.removeAll { $0 == p } }) {
+                                            Image(systemName: "xmark.circle.fill")
+                                                .font(.system(size: 15))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                    .padding(.vertical, 2)
+                                }
+                            }
+                            .padding(12)
+                        }
+                        .frame(maxHeight: 140)
+                    }
+                }
+            }
+            .padding(10)
+        }
+        .frame(height: 210)
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            handleDrop(providers) { addInstallFile($0) }
+            return true
+        }
     }
 
     // MARK: 传文件 Tab
@@ -879,8 +888,10 @@ struct ContentView: View {
                 }
                 ZStack {
                     RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color(nsColor: .tertiaryLabelColor), style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
                         .fill(Color(nsColor: .textBackgroundColor).opacity(0.4))
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+                        .foregroundColor(Color(nsColor: .tertiaryLabelColor))
                     VStack(spacing: 8) {
                         if droppedTransfers.isEmpty {
                             Image(systemName: "tray.and.arrow.down").font(.title).foregroundColor(.accentColor)
@@ -1034,7 +1045,7 @@ struct ContentView: View {
                 .frame(height: 132)
                 .padding(8)
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
-                .onChange(of: client.log) {
+                .onChange(of: client.log) { _ in
                     proxy.scrollTo("logBottom", anchor: .bottom)
                 }
             }
