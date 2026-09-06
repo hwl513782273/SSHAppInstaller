@@ -16,13 +16,27 @@ struct RemoteEntry: Identifiable, Equatable {
     var id: String { name }
 }
 
+// MARK: - 传输进度（value=nil 表示不确定进度/转圈）
+struct TransferProgress: Equatable {
+    let label: String
+    let value: Double?
+}
+
 // MARK: - SSH 执行核心
 final class SSHClient: ObservableObject {
     @Published var isBusy: Bool = false
     @Published var log: String = ""
     @Published var connectionOK: Bool = false
     @Published var toast: ToastInfo? = nil   // 成功浮窗(含显示位置)
+    @Published var progress: TransferProgress? = nil   // 安装/上传/下载进度条
     private var toastDismissWork: DispatchWorkItem? = nil
+
+    func setProgress(_ label: String, _ value: Double?) {
+        DispatchQueue.main.async { self.progress = TransferProgress(label: label, value: value) }
+    }
+    func clearProgress() {
+        DispatchQueue.main.async { self.progress = nil }
+    }
 
     // 自动消失:新提示先取消上一条的清除任务,清除时只清自己那条(id 比对),彻底避免竞态残留
     func showToast(_ s: String, target: ToastTarget = .window) {
@@ -144,7 +158,9 @@ final class SSHClient: ObservableObject {
     }
 
     /// 统一子进程执行：并发抽干 out/err（避免管道写满死锁）+ 超时终止（避免网络挂起卡死）
-    private func run(launch: String, args: [String], usePassword: Bool, timeout: TimeInterval = 600) -> (Bool, String) {
+    /// onOutput：stdout 每读到一块就实时回调（scp 进度解析用），不影响最终返回值
+    private func run(launch: String, args: [String], usePassword: Bool, timeout: TimeInterval = 600,
+                     onOutput: ((Data) -> Void)? = nil) -> (Bool, String) {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: launch)
         proc.arguments = args
@@ -185,6 +201,7 @@ final class SSHClient: ObservableObject {
                 let d = out.fileHandleForReading.availableData
                 if d.isEmpty { break }
                 buf.append(d)
+                onOutput?(d)
             }
             lock.lock(); outBuf = buf; lock.unlock()
             group.leave()
@@ -245,19 +262,40 @@ final class SSHClient: ObservableObject {
     // 远端路径不额外加引号：新版 scp 走 SFTP 协议，路径由 sftp-server 按字面处理，
     // 额外转义反而会把反斜杠当真实字符。本地路径经 Process 参数直传，也不经 shell。
     func scpUp(local: String, remote: String, timeout: TimeInterval = 1800) -> (Bool, String) {
-        let ep = trimmedEndpoint(host: host, user: user, port: port)
-        var a = scpArgs()
-        a.append(local)
-        a.append("\(ep.user)@\(ep.host):\(remote)")
-        return run(launch: "/usr/bin/scp", args: a, usePassword: !useKey, timeout: timeout)
+        scpTransfer(download: false, remotePath: remote, localPath: local, timeout: timeout)
     }
 
     func scpDown(remote: String, local: String, timeout: TimeInterval = 1800) -> (Bool, String) {
+        scpTransfer(download: true, remotePath: remote, localPath: local, timeout: timeout)
+    }
+
+    /// scp 传输（带进度条）：scp 只在 tty 下输出进度，用 `script` 伪造伪 tty 激活它，
+    /// 实时解析输出里的 "xx%" 更新进度条。密码认证依赖 SSH_ASKPASS_REQUIRE=force
+    /// （OpenSSH 8.4+，macOS 12 自带 8.6 满足），有 tty 也会走 askpass 而不是交互提示。
+    private func scpTransfer(download: Bool, remotePath: String, localPath: String, timeout: TimeInterval) -> (Bool, String) {
         let ep = trimmedEndpoint(host: host, user: user, port: port)
-        var a = scpArgs()
-        a.append("\(ep.user)@\(ep.host):\(remote)")
-        a.append(local)
-        return run(launch: "/usr/bin/scp", args: a, usePassword: !useKey, timeout: timeout)
+        var scpCmd = ["/usr/bin/scp"] + scpArgs()
+        if download {
+            scpCmd += ["\(ep.user)@\(ep.host):\(remotePath)", localPath]
+        } else {
+            scpCmd += [localPath, "\(ep.user)@\(ep.host):\(remotePath)"]
+        }
+        let label = "\(download ? "下载" : "上传") \((localPath as NSString).lastPathComponent)"
+        setProgress(label, 0)
+        let (ok, out) = run(launch: "/usr/bin/script",
+                            args: ["-q", "/dev/null"] + scpCmd,
+                            usePassword: !useKey, timeout: timeout) { [weak self] data in
+            guard let s = String(data: data, encoding: .utf8) else { return }
+            // scp 进度用 \r 原地刷新，统一拆行后提取 "xx%"
+            for line in s.replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n") {
+                guard let r = line.range(of: #"[0-9]{1,3}%"#, options: .regularExpression) else { continue }
+                if let v = Double(line[r].dropLast()), v >= 0, v <= 100 {
+                    self?.setProgress(label, min(v / 100.0, 1.0))
+                }
+            }
+        }
+        clearProgress()
+        return (ok, out)
     }
 
     func test() -> Bool {
@@ -299,11 +337,15 @@ final class SSHClient: ObservableObject {
         defer {
             // 成功失败都清理远端临时包，不再出现失败分支漏删导致 /tmp 堆积
             let _ = remote("rm -rf \(shellQuote(tmpRemote))", timeout: 60)
+            clearProgress()   // 安装结束(无论成败)都撤掉进度条
         }
 
         append("· 上传到目标机 ...")
         let (ok1, o1) = scpUp(local: localPath, remote: tmpRemote)
         if !ok1 { append("✗ 上传失败:\(o1)"); return }
+
+        // 上传完成，远端安装阶段无法量化，显示转圈
+        setProgress("在远端安装 \(name) …", nil)
 
         switch ext {
         case "app": installAppBundle(fromRemote: tmpRemote, name: name)
@@ -664,27 +706,21 @@ struct ContentView: View {
     @State private var showRemoteBrowser: Bool = false    // 远端文件浏览器
 
     var body: some View {
-        GeometryReader { geo in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    connectionSection
-                    Divider()
-                    TabView {
-                        installTab.tag(0)
-                            .tabItem { Label("安装软件", systemImage: "square.and.arrow.down.on.square") }
-                        transferTab.tag(1)
-                            .tabItem { Label("传文件", systemImage: "arrow.left.arrow.right") }
-                    }
-                    .frame(minHeight: 360)
-                    Divider()
-                    logSection
-                }
-                .padding(16)
-                // 关键修复：内容不足一屏时顶部对齐撑满(等效弹性布局，绝不居中裁切)；
-                // 内容超出一屏时可从顶部开始正常滚动，任何窗口尺寸都不遮挡
-                .frame(minHeight: geo.size.height, alignment: .top)
+        // 整体固定布局不可滚动（需求）；日志框自身可滚动；高度靠弹性 TabView 适配
+        VStack(alignment: .leading, spacing: 10) {
+            connectionSection
+            Divider()
+            TabView {
+                installTab.tag(0)
+                    .tabItem { Label("安装软件", systemImage: "square.and.arrow.down.on.square") }
+                transferTab.tag(1)
+                    .tabItem { Label("传文件", systemImage: "arrow.left.arrow.right") }
             }
+            .frame(minHeight: 300)
+            Divider()
+            logSection
         }
+        .padding(14)
         .overlay(alignment: .bottom) {
             if client.toast?.target == .window, let msg = client.toast?.message {
                 ToastView(message: msg)
@@ -816,7 +852,7 @@ struct ContentView: View {
                             }
                             .padding(12)
                         }
-                        .frame(maxHeight: 140)
+                        .frame(maxHeight: 106)
                     } else {
                         ScrollView {
                             VStack(alignment: .leading, spacing: 4) {
@@ -841,13 +877,13 @@ struct ContentView: View {
                             }
                             .padding(12)
                         }
-                        .frame(maxHeight: 140)
+                        .frame(maxHeight: 106)
                     }
                 }
             }
             .padding(10)
         }
-        .frame(height: 210)
+        .frame(height: 168)
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             handleDrop(providers) { addInstallFile($0) }
             return true
@@ -934,7 +970,7 @@ struct ContentView: View {
                                     .padding(12)
                                 }
                             }
-                            .frame(maxHeight: 162)
+                            .frame(maxHeight: 128)
                             HStack {
                                 Button("清除全部") { droppedTransfers.removeAll() }.font(.caption)
                                 Spacer()
@@ -943,7 +979,7 @@ struct ContentView: View {
                     }
                     .padding(10)
                 }
-                .frame(height: 210)
+                .frame(height: 168)
                 .onDrop(of: [.fileURL], isTargeted: nil) { providers in
                     handleDrop(providers) { p in
                         if !droppedTransfers.contains(p) { droppedTransfers.append(p) }
@@ -1033,8 +1069,23 @@ struct ContentView: View {
     // MARK: 日志
     private var logSection: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack {
+            HStack(spacing: 10) {
                 Text("日志").font(.headline)
+                // 安装/上传/下载进度条：有百分比走进度条，远端操作阶段显示转圈
+                if let p = client.progress {
+                    if let v = p.value {
+                        ProgressView(value: v)
+                            .frame(width: 170)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Text(p.label)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
                 Spacer()
                 Button("清空") { client.clearLog() }.font(.caption)
             }
@@ -1047,8 +1098,8 @@ struct ContentView: View {
                         .id("logTop")
                     Spacer().id("logBottom")
                 }
-                .frame(height: 132)
-                .padding(8)
+                .frame(height: 88)
+                .padding(6)
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
                 .onChange(of: client.log) { _ in
                     proxy.scrollTo("logBottom", anchor: .bottom)
