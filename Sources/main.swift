@@ -663,19 +663,22 @@ struct ContentView: View {
     @State private var showRemoteBrowser: Bool = false    // 远端文件浏览器
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            connectionSection
-            Divider()
-            TabView {
-                installTab.tag(0)
-                    .tabItem { Label("安装软件", systemImage: "square.and.arrow.down.on.square") }
-                transferTab.tag(1)
-                    .tabItem { Label("传文件", systemImage: "arrow.left.arrow.right") }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                connectionSection
+                Divider()
+                TabView {
+                    installTab.tag(0)
+                        .tabItem { Label("安装软件", systemImage: "square.and.arrow.down.on.square") }
+                    transferTab.tag(1)
+                        .tabItem { Label("传文件", systemImage: "arrow.left.arrow.right") }
+                }
+                .frame(minHeight: 360)
+                Divider()
+                logSection
             }
-            Divider()
-            logSection
+            .padding(16)
         }
-        .padding(16)
         .overlay(alignment: .bottom) {
             if client.toast?.target == .window, let msg = client.toast?.message {
                 ToastView(message: msg)
@@ -845,7 +848,7 @@ struct ContentView: View {
                 Text("下载 (远端 → 本机)").tag(true)
             }
             .pickerStyle(.segmented)
-            .frame(width: 280)
+            .fixedSize()   // 完整显示文案,不出现"..."截断
 
             if transferDownload {
                 // 下载:远端路径 + 本机保存路径(远端文件可文本输入或点「浏览」图形化选择)
@@ -854,7 +857,7 @@ struct ContentView: View {
                     Button("浏览") { showRemoteBrowser = true }
                 }
                 HStack {
-                    TextField("保存到本机路径", text: $transferLocal).textFieldStyle(.roundedBorder)
+                    TextField("保存到本机路径", text: $transferLocal, prompt: Text("默认本机 ~/Downloads/")).textFieldStyle(.roundedBorder)
                     Button("选择") { if let p = chooseFile(allowDir: true) { transferLocal = p } }
                 }
             } else {
@@ -940,8 +943,13 @@ struct ContentView: View {
                 Spacer()
                 Button(action: {
                     if transferDownload {
-                        guard !transferLocal.isEmpty, !downloadRemote.isEmpty else { return }
-                        let l = transferLocal, r = downloadRemote
+                        // 远端源/本机保存路径都允许留空：默认对方的下载文件夹 → 本机的下载文件夹
+                        let l = transferLocal.isEmpty
+                            ? (NSHomeDirectory() as NSString).appendingPathComponent("Downloads")
+                            : transferLocal
+                        let r = downloadRemote.isEmpty
+                            ? "/Users/\(client.user)/Downloads/"
+                            : downloadRemote
                         client.isBusy = true
                         Task {
                             // 先判断远端路径是文件夹还是文件
@@ -972,9 +980,9 @@ struct ContentView: View {
                         }
                     }
                 }) {
-                    if client.isBusy { ProgressView().controlSize(.small) } else { Text(transferDownload ? "开始下载" : "开始上传（\(droppedTransfers.count)）").bold() }
+                    if client.isBusy { ProgressView().controlSize(.small) } else { Text(transferDownload ? "开始下载" : "开始上传（\(droppedTransfers.count)）").bold().fixedSize() }
                 }
-                .disabled(client.isBusy || (transferDownload ? (transferLocal.isEmpty || downloadRemote.isEmpty) : droppedTransfers.isEmpty))
+                .disabled(client.isBusy || (!transferDownload && droppedTransfers.isEmpty))
                 .buttonStyle(.borderedProminent)
             }
         }
@@ -986,21 +994,7 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.25), value: client.toast)
-        .onChange(of: transferDownload) {
-            // 切到下载方向时，给"下载路径"填默认值；上传路径留空则在上传时自动用默认 Downloads
-            if transferDownload && downloadRemote.isEmpty {
-                downloadRemote = "/Users/\(client.user)/Downloads/"
-            }
-        }
-        .onChange(of: client.user) {
-            let def = "/Users/\(client.user)/Downloads/"
-            if downloadRemote.hasPrefix("/Users/") && downloadRemote.hasSuffix("/Downloads/") {
-                downloadRemote = def
-            }
-            if uploadRemote.hasPrefix("/Users/") && uploadRemote.hasSuffix("/Downloads/") {
-                uploadRemote = def
-            }
-        }
+        // 远端路径留空 = 使用默认的对方 ~/Downloads（占位符已提示），不再自动代填
         .alert("下载文件夹确认", isPresented: $showDirConfirm) {
             Button("下载全部文件") {
                 let r = pendingDownloadRemote, l = pendingDownloadLocal
@@ -1037,7 +1031,7 @@ struct ContentView: View {
                         .id("logTop")
                     Spacer().id("logBottom")
                 }
-                .frame(height: 150)
+                .frame(height: 132)
                 .padding(8)
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
                 .onChange(of: client.log) {
