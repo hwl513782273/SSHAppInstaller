@@ -656,7 +656,7 @@ private struct RemoteFileBrowser: View {
         errorText = ""
         loading = true
         pathInput = target
-        Task {
+        Task.detached {
             let (ok, list, realPath, err) = client.remoteList(target, showHidden: hidden)
             await MainActor.run {
                 guard seq == loadSeq else { return }
@@ -944,7 +944,7 @@ private struct RemoteBrowserBox: View {
         errorText = ""
         loading = true
         pathInput = target
-        Task {
+        Task.detached {
             let (ok, list, realPath, err) = client.remoteList(target, showHidden: hidden)
             await MainActor.run {
                 guard seq == loadSeq else { return }
@@ -1083,7 +1083,7 @@ struct ContentView: View {
                 Spacer()
                 Button(action: {
                     client.isBusy = true
-                    Task {
+                    Task.detached {
                         let _ = client.test()
                         await MainActor.run { client.isBusy = false }
                     }
@@ -1146,7 +1146,7 @@ struct ContentView: View {
                     guard !droppedInstalls.isEmpty else { return }
                     let paths = droppedInstalls
                     client.isBusy = true
-                    Task {
+                    Task.detached {
                         for p in paths { client.install(localPath: p) }
                         await MainActor.run { client.isBusy = false }
                     }
@@ -1345,7 +1345,7 @@ struct ContentView: View {
                             ? ["/Users/\(client.user)/Downloads/"]
                             : downloadItems
                         client.isBusy = true
-                        Task {
+                        Task.detached {
                             if items.count == 1, let r = items.first {
                                 // 单路径：先判断远端路径是文件夹还是文件
                                 let safeR = r.replacingOccurrences(of: "'", with: "'\\''")
@@ -1376,7 +1376,7 @@ struct ContentView: View {
                         let items = droppedTransfers
                         let r = uploadRemote.isEmpty ? "/Users/\(client.user)/Downloads/" : uploadRemote
                         client.isBusy = true
-                        Task {
+                        Task.detached {
                             for p in items { client.transfer(local: p, remote: r, download: false) }
                             await MainActor.run { client.isBusy = false }
                         }
@@ -1401,7 +1401,7 @@ struct ContentView: View {
             Button("下载全部文件") {
                 let r = pendingDownloadRemote, l = pendingDownloadLocal
                 client.isBusy = true
-                Task {
+                Task.detached {
                     client.transfer(local: l, remote: r, download: true)
                     await MainActor.run { client.isBusy = false }
                 }
