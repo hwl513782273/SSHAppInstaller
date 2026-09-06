@@ -448,10 +448,12 @@ final class SSHClient: ObservableObject {
     }
 
     /// 远端目录列举：cd 进目标目录后用 pwd 取真实绝对路径（支持 "~"、"."、相对路径等输入），
-    /// 再用 `ls -1Ap` 列举（-1 单列 / -A 含隐藏 / -p 目录带 / 后缀，POSIX 选项，macOS/Linux 通用）。
+    /// 再用 `ls -1p` 列举（-1 单列 / -p 目录带 / 后缀，POSIX 选项，macOS/Linux 通用）。
+    /// 默认不列隐藏文件，showHidden=true 时用 -A 包含。
     /// 返回 (是否成功, 条目列表, 真实绝对路径, 错误信息)。
-    func remoteList(_ path: String) -> (Bool, [RemoteEntry], String, String) {
-        let cmd = "cd \(shellQuote(path)) 2>/dev/null && echo __PWD__$(pwd) && ls -1Ap"
+    func remoteList(_ path: String, showHidden: Bool = false) -> (Bool, [RemoteEntry], String, String) {
+        let ls = showHidden ? "ls -1Ap" : "ls -1p"
+        let cmd = "cd \(shellQuote(path)) 2>/dev/null && echo __PWD__$(pwd) && \(ls)"
         let (ok, out) = remote(cmd, timeout: 30)
         guard ok else { return (false, [], "", out) }
         var realPath = path
@@ -501,12 +503,19 @@ private struct RemoteFileBrowser: View {
     @State private var errorText = ""
     @State private var pathInput = ""
     @State private var loadSeq = 0     // 防乱序：快速连点"前往/上级"时只采纳最后一次请求的结果
+    @State private var showHidden = false   // 默认不显示隐藏文件
 
     var body: some View {
         VStack(spacing: 10) {
             HStack {
                 Text("远端文件浏览").font(.headline)
                 Spacer()
+                Toggle("显示隐藏文件", isOn: Binding(
+                    get: { showHidden },
+                    set: { showHidden = $0; if !currentPath.isEmpty { load(currentPath) } }
+                ))
+                .toggleStyle(.checkbox)
+                .font(.caption)
                 Button("关闭") { dismiss() }
             }
             HStack(spacing: 8) {
@@ -606,14 +615,16 @@ private struct RemoteFileBrowser: View {
         dir.hasSuffix("/") ? dir + name : dir + "/" + name
     }
 
-    // 初始目录：已有输入像文件（带扩展名）则落到其父目录；为空则落到远端家目录(".")
+    // 初始目录：已有输入像文件（带扩展名）则落到其父目录；为空则默认落到对方的下载目录
     private func initialLoad() {
         let r = selectedPath.trimmingCharacters(in: .whitespacesAndNewlines)
         var start = r
         if !r.isEmpty, r != "/", !(r as NSString).pathExtension.isEmpty {
             start = (r as NSString).deletingLastPathComponent
         }
-        if start.isEmpty { start = "." }
+        if start.isEmpty {
+            start = client.user.isEmpty ? "." : "/Users/\(client.user)/Downloads/"
+        }
         load(start)
     }
 
@@ -627,12 +638,13 @@ private struct RemoteFileBrowser: View {
         guard !target.isEmpty else { return }
         loadSeq += 1
         let seq = loadSeq
+        let hidden = showHidden
         selection = nil
         errorText = ""
         loading = true
         pathInput = target
         Task {
-            let (ok, list, realPath, err) = client.remoteList(target)
+            let (ok, list, realPath, err) = client.remoteList(target, showHidden: hidden)
             await MainActor.run {
                 guard seq == loadSeq else { return }
                 loading = false
