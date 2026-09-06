@@ -610,11 +610,21 @@ private struct RemoteFileBrowser: View {
 // MARK: - 主 App
 @main
 struct SSHAppInstallerApp: App {
+    // 默认窗口 900×744；屏幕不够大时按可用区域自适应缩小（但不小于可交互的最小尺寸）
+    private static func idealFrame() -> (w: CGFloat, h: CGFloat) {
+        let vf = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let w = max(760, min(900, vf.width - 80))
+        let h = max(600, min(744, vf.height - 80))
+        return (w, h)
+    }
+
     var body: some Scene {
         WindowGroup {
+            let size = Self.idealFrame()
             ContentView()
                 .preferredColorScheme(.dark)
                 .tint(Color.accentColor)
+                .frame(width: size.w, height: size.h)
                 .frame(minWidth: 760, minHeight: 600)
         }
         .windowResizability(.contentSize)
@@ -640,7 +650,8 @@ struct ContentView: View {
     @StateObject private var client = SSHClient()
     @State private var droppedInstalls: [String] = []
     @State private var transferLocal: String = ""
-    @State private var transferRemote: String = ""
+    @State private var uploadRemote: String = ""      // 上传目标路径(远端)，与下载路径相互独立
+    @State private var downloadRemote: String = ""    // 下载远端路径
     @State private var transferDownload: Bool = false
     @State private var showKeyPicker = false
     @State private var installViewMode: InstallViewMode = .icon
@@ -839,7 +850,7 @@ struct ContentView: View {
             if transferDownload {
                 // 下载:远端路径 + 本机保存路径(远端文件可文本输入或点「浏览」图形化选择)
                 HStack {
-                    TextField("远端路径 (如 /tmp/a.txt)", text: $transferRemote, prompt: Text("默认 /Users/\(client.user)/Downloads/")).textFieldStyle(.roundedBorder)
+                    TextField("远端路径 (如 /tmp/a.txt)", text: $downloadRemote, prompt: Text("默认 /Users/\(client.user)/Downloads/")).textFieldStyle(.roundedBorder)
                     Button("浏览") { showRemoteBrowser = true }
                 }
                 HStack {
@@ -921,7 +932,7 @@ struct ContentView: View {
                     return true
                 }
                 HStack {
-                    TextField("远端目标路径", text: $transferRemote, prompt: Text("默认 /Users/\(client.user)/Downloads/")).textFieldStyle(.roundedBorder)
+                    TextField("远端目标路径", text: $uploadRemote, prompt: Text("默认 /Users/\(client.user)/Downloads/")).textFieldStyle(.roundedBorder)
                     Button("浏览") { showRemoteBrowser = true }
                 }
             }
@@ -929,8 +940,8 @@ struct ContentView: View {
                 Spacer()
                 Button(action: {
                     if transferDownload {
-                        guard !transferLocal.isEmpty, !transferRemote.isEmpty else { return }
-                        let l = transferLocal, r = transferRemote
+                        guard !transferLocal.isEmpty, !downloadRemote.isEmpty else { return }
+                        let l = transferLocal, r = downloadRemote
                         client.isBusy = true
                         Task {
                             // 先判断远端路径是文件夹还是文件
@@ -953,7 +964,7 @@ struct ContentView: View {
                     } else {
                         guard !droppedTransfers.isEmpty else { return }
                         let items = droppedTransfers
-                        let r = transferRemote.isEmpty ? "/Users/\(client.user)/Downloads/" : transferRemote
+                        let r = uploadRemote.isEmpty ? "/Users/\(client.user)/Downloads/" : uploadRemote
                         client.isBusy = true
                         Task {
                             for p in items { client.transfer(local: p, remote: r, download: false) }
@@ -963,7 +974,7 @@ struct ContentView: View {
                 }) {
                     if client.isBusy { ProgressView().controlSize(.small) } else { Text(transferDownload ? "开始下载" : "开始上传（\(droppedTransfers.count)）").bold() }
                 }
-                .disabled(client.isBusy || (transferDownload ? (transferLocal.isEmpty || transferRemote.isEmpty) : droppedTransfers.isEmpty))
+                .disabled(client.isBusy || (transferDownload ? (transferLocal.isEmpty || downloadRemote.isEmpty) : droppedTransfers.isEmpty))
                 .buttonStyle(.borderedProminent)
             }
         }
@@ -976,13 +987,18 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: client.toast)
         .onChange(of: transferDownload) {
-            if transferRemote.isEmpty {
-                transferRemote = "/Users/\(client.user)/Downloads/"
+            // 切到下载方向时，给"下载路径"填默认值；上传路径留空则在上传时自动用默认 Downloads
+            if transferDownload && downloadRemote.isEmpty {
+                downloadRemote = "/Users/\(client.user)/Downloads/"
             }
         }
         .onChange(of: client.user) {
-            if transferRemote.hasPrefix("/Users/") && transferRemote.hasSuffix("/Downloads/") {
-                transferRemote = "/Users/\(client.user)/Downloads/"
+            let def = "/Users/\(client.user)/Downloads/"
+            if downloadRemote.hasPrefix("/Users/") && downloadRemote.hasSuffix("/Downloads/") {
+                downloadRemote = def
+            }
+            if uploadRemote.hasPrefix("/Users/") && uploadRemote.hasSuffix("/Downloads/") {
+                uploadRemote = def
             }
         }
         .alert("下载文件夹确认", isPresented: $showDirConfirm) {
@@ -999,7 +1015,8 @@ struct ContentView: View {
             Text("远端路径是一个文件夹：\n\(pendingDownloadRemote)\n\n是否下载该文件夹内的所有文件？")
         }
         .sheet(isPresented: $showRemoteBrowser) {
-            RemoteFileBrowser(client: client, selectedPath: $transferRemote)
+            // 按当前方向决定浏览器把选中结果填回哪个输入框
+            RemoteFileBrowser(client: client, selectedPath: transferDownload ? $downloadRemote : $uploadRemote)
         }
     }
 
