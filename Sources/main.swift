@@ -662,6 +662,170 @@ private struct RemoteFileBrowser: View {
     }
 }
 
+// MARK: - 内嵌远端浏览框（下载方向：直接在框里浏览远端文件，替代弹出窗口）
+private struct RemoteBrowserBox: View {
+    let client: SSHClient
+    @Binding var selectedPath: String
+    @State private var currentPath = ""
+    @State private var entries: [RemoteEntry] = []
+    @State private var selection: RemoteEntry? = nil
+    @State private var loading = false
+    @State private var errorText = ""
+    @State private var pathInput = ""
+    @State private var showHidden = false
+    @State private var loadSeq = 0
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 6) {
+                TextField("对方路径(回车前往)", text: $pathInput)
+                    .textFieldStyle(.plain)
+                    .font(.caption)
+                    .onSubmit { load(pathInput) }
+                Button { up() } label: { Image(systemName: "chevron.up").font(.caption) }
+                    .buttonStyle(.borderless)
+                    .help("上级目录")
+                Button { load(currentPath) } label: { Image(systemName: "arrow.clockwise").font(.caption) }
+                    .buttonStyle(.borderless)
+                    .help("刷新")
+                    .disabled(currentPath.isEmpty || loading)
+                Toggle("隐藏", isOn: Binding(
+                    get: { showHidden },
+                    set: { showHidden = $0; if !currentPath.isEmpty { load(currentPath) } }
+                ))
+                .toggleStyle(.checkbox)
+                .font(.caption2)
+            }
+            Divider()
+            ZStack {
+                if loading {
+                    ProgressView().controlSize(.small)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if !errorText.isEmpty {
+                    Text(errorText)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                } else if entries.isEmpty {
+                    Text("（空目录）").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(sortedEntries) { e in
+                                HStack(spacing: 5) {
+                                    Image(systemName: e.isDir ? "folder.fill" : "doc")
+                                        .font(.caption2)
+                                        .foregroundStyle(e.isDir ? Color.accentColor : Color.secondary)
+                                        .frame(width: 14)
+                                    Text(e.name)
+                                        .font(.caption)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Spacer()
+                                    if selection == e {
+                                        Image(systemName: "checkmark")
+                                            .font(.caption2)
+                                            .foregroundStyle(Color.accentColor)
+                                    }
+                                }
+                                .padding(.vertical, 1.5)
+                                .padding(.horizontal, 4)
+                                .contentShape(Rectangle())
+                                .background(selection == e ? Color.accentColor.opacity(0.15) : Color.clear)
+                                // 顺序关键：双击手势先注册，否则被单击吞掉
+                                .onTapGesture(count: 2) {
+                                    if e.isDir { load(join(currentPath, e.name)) }
+                                }
+                                .onTapGesture(count: 1) {
+                                    selection = e
+                                    selectedPath = join(currentPath, e.name)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Text(hint)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .textBackgroundColor).opacity(0.5)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+                .foregroundColor(Color(nsColor: .tertiaryLabelColor))
+        )
+        .onAppear { initialLoad() }
+    }
+
+    private var sortedEntries: [RemoteEntry] {
+        entries.sorted {
+            if $0.isDir != $1.isDir { return $0.isDir }
+            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+    }
+
+    private var hint: String {
+        if let e = selection {
+            return "已选中：\(join(currentPath, e.name))"
+        }
+        return "单击选中下载文件/文件夹，双击进入文件夹；不选则默认对方下载目录"
+    }
+
+    private func join(_ dir: String, _ name: String) -> String {
+        dir.hasSuffix("/") ? dir + name : dir + "/" + name
+    }
+
+    private func initialLoad() {
+        let r = selectedPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        var start = r
+        if !r.isEmpty, r != "/", !(r as NSString).pathExtension.isEmpty {
+            start = (r as NSString).deletingLastPathComponent
+        }
+        if start.isEmpty {
+            start = client.user.isEmpty ? "." : "/Users/\(client.user)/Downloads/"
+        }
+        load(start)
+    }
+
+    private func up() {
+        let parent = (currentPath as NSString).deletingLastPathComponent
+        load(parent.isEmpty ? "/" : parent)
+    }
+
+    private func load(_ p: String) {
+        let target = p.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return }
+        loadSeq += 1
+        let seq = loadSeq
+        let hidden = showHidden
+        selection = nil
+        errorText = ""
+        loading = true
+        pathInput = target
+        Task {
+            let (ok, list, realPath, err) = client.remoteList(target, showHidden: hidden)
+            await MainActor.run {
+                guard seq == loadSeq else { return }
+                loading = false
+                if ok {
+                    currentPath = realPath
+                    pathInput = realPath
+                    entries = list
+                } else {
+                    errorText = err.isEmpty ? "无法访问 \(target)" : "✗ \(err)"
+                    currentPath = ""
+                    entries = []
+                }
+            }
+        }
+    }
+}
+
 // MARK: - 主 App
 @main
 struct SSHAppInstallerApp: App {
@@ -913,11 +1077,9 @@ struct ContentView: View {
             .fixedSize()   // 完整显示文案,不出现"..."截断
 
             if transferDownload {
-                // 下载:远端路径 + 本机保存路径(远端文件可文本输入或点「浏览」图形化选择)
-                HStack {
-                    TextField("远端路径 (如 /tmp/a.txt)", text: $downloadRemote, prompt: Text("默认 /Users/\(client.user)/Downloads/")).textFieldStyle(.roundedBorder)
-                    Button("浏览") { showRemoteBrowser = true }
-                }
+                // 下载:内嵌远端浏览框(像上传的拖放框一样嵌在界面里,不弹窗) + 本机保存路径
+                RemoteBrowserBox(client: client, selectedPath: $downloadRemote)
+                    .frame(height: 168)
                 HStack {
                     TextField("保存到本机路径", text: $transferLocal, prompt: Text("默认本机 ~/Downloads/")).textFieldStyle(.roundedBorder)
                     Button("选择") { if let p = chooseFile(allowDir: true) { transferLocal = p } }
