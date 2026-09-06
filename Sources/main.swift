@@ -664,21 +664,26 @@ struct ContentView: View {
     @State private var showRemoteBrowser: Bool = false    // 远端文件浏览器
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                connectionSection
-                Divider()
-                TabView {
-                    installTab.tag(0)
-                        .tabItem { Label("安装软件", systemImage: "square.and.arrow.down.on.square") }
-                    transferTab.tag(1)
-                        .tabItem { Label("传文件", systemImage: "arrow.left.arrow.right") }
+        GeometryReader { geo in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    connectionSection
+                    Divider()
+                    TabView {
+                        installTab.tag(0)
+                            .tabItem { Label("安装软件", systemImage: "square.and.arrow.down.on.square") }
+                        transferTab.tag(1)
+                            .tabItem { Label("传文件", systemImage: "arrow.left.arrow.right") }
+                    }
+                    .frame(minHeight: 360)
+                    Divider()
+                    logSection
                 }
-                .frame(minHeight: 360)
-                Divider()
-                logSection
+                .padding(16)
+                // 关键修复：内容不足一屏时顶部对齐撑满(等效弹性布局，绝不居中裁切)；
+                // 内容超出一屏时可从顶部开始正常滚动，任何窗口尺寸都不遮挡
+                .frame(minHeight: geo.size.height, alignment: .top)
             }
-            .padding(16)
         }
         .overlay(alignment: .bottom) {
             if client.toast?.target == .window, let msg = client.toast?.message {
