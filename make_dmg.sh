@@ -2,7 +2,7 @@
 set -e
 cd "$(dirname "$0")"
 APP=SSHAppInstaller
-VERSION=1.1-beta6
+VERSION=1.1-beta7
 DMG="12-$APP-$VERSION-universal.dmg"
 rm -rf staging
 mkdir -p staging

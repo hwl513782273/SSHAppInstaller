@@ -460,9 +460,10 @@ final class SSHClient: ObservableObject {
         var realPath = path
         var entries: [RemoteEntry] = []
         // ls -l 行格式: 权限 链接 属主 组 大小 月份 日 时间/年份 文件名
-        // 用正则按前 8 字段锚定，文件名整段保留（文件名含空格安全；日期多空格由 \s+ 吸收）
+        // 宽松正则：首字符取权限类型（macOS 扩展属性会追加 @/+，不能对权限串后段做严格匹配，
+        // 否则带 @ 的普通文件全部解析失败），前 8 字段锚定后文件名整段保留（含空格安全）
         let re = try? NSRegularExpression(
-            pattern: #"^([-dlbcps][-rwxstST@+.]{9})\s+\S+\s+\S+\s+\S+\s+(\d+)\s+\S+\s+\S+\s+\S+\s(.+)$"#
+            pattern: #"^(\S)\S*\s+\S+\s+\S+\s+\S+\s+(\d+)\s+\S+\s+\S+\s+\S+\s(.+)$"#
         )
         for line in out.components(separatedBy: "\n") {
             guard !line.isEmpty else { continue }
