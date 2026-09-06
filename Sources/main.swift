@@ -10,9 +10,10 @@ struct ToastInfo: Equatable {
 }
 
 // MARK: - 远端文件条目（浏览器用）
-struct RemoteEntry: Identifiable, Equatable {
+struct RemoteEntry: Identifiable, Equatable, Hashable {
     let name: String
     let isDir: Bool
+    let size: Int64      // 字节；目录无意义但 ls -l 仍会给值，仅列表视图展示用
     var id: String { name }
 }
 
@@ -448,25 +449,36 @@ final class SSHClient: ObservableObject {
     }
 
     /// 远端目录列举：cd 进目标目录后用 pwd 取真实绝对路径（支持 "~"、"."、相对路径等输入），
-    /// 再用 `ls -1p` 列举（-1 单列 / -p 目录带 / 后缀，POSIX 选项，macOS/Linux 通用）。
+    /// 再用 `ls -lp` 列举（-l 长格式带大小 / -p 目录带 / 后缀，POSIX 选项，macOS/Linux 通用）。
     /// 默认不列隐藏文件，showHidden=true 时用 -A 包含。
     /// 返回 (是否成功, 条目列表, 真实绝对路径, 错误信息)。
     func remoteList(_ path: String, showHidden: Bool = false) -> (Bool, [RemoteEntry], String, String) {
-        let ls = showHidden ? "ls -1Ap" : "ls -1p"
+        let ls = showHidden ? "ls -lAp" : "ls -lp"   // -l 长格式(带文件大小)，POSIX 选项
         let cmd = "cd \(shellQuote(path)) 2>/dev/null && echo __PWD__$(pwd) && \(ls)"
         let (ok, out) = remote(cmd, timeout: 30)
         guard ok else { return (false, [], "", out) }
         var realPath = path
         var entries: [RemoteEntry] = []
+        // ls -l 行格式: 权限 链接 属主 组 大小 月份 日 时间/年份 文件名
+        // 用正则按前 8 字段锚定，文件名整段保留（文件名含空格安全；日期多空格由 \s+ 吸收）
+        let re = try? NSRegularExpression(
+            pattern: #"^([-dlbcps][-rwxstST@+.]{9})\s+\S+\s+\S+\s+\S+\s+(\d+)\s+\S+\s+\S+\s+\S+\s(.+)$"#
+        )
         for line in out.components(separatedBy: "\n") {
             guard !line.isEmpty else { continue }
             if line.hasPrefix("__PWD__") {
                 realPath = String(line.dropFirst("__PWD__".count))
-            } else if line.hasSuffix("/") {
-                entries.append(RemoteEntry(name: String(line.dropLast()), isDir: true))
-            } else {
-                entries.append(RemoteEntry(name: line, isDir: false))
+                continue
             }
+            guard let re,
+                  let m = re.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+                  m.numberOfRanges >= 4 else { continue }   // "total xx" 等行跳过
+            let perms = String(line[Range(m.range(at: 1), in: line)!])
+            let size = Int64(line[Range(m.range(at: 2), in: line)!]) ?? 0
+            var name = String(line[Range(m.range(at: 3), in: line)!])
+            if let arrow = name.range(of: " -> ") { name = String(name[..<arrow.lowerBound]) }  // 符号链接只取链接名
+            if name.hasSuffix("/") { name.removeLast() }
+            entries.append(RemoteEntry(name: name, isDir: perms.hasPrefix("d"), size: size))
         }
         return (true, entries, realPath, "")
     }
@@ -496,7 +508,7 @@ private struct RemoteFileBrowser: View {
     let client: SSHClient
     @Binding var selectedPath: String
     @Environment(\.dismiss) private var dismiss
-    @State private var currentPath = ""
+    @State var currentPath = ""
     @State private var entries: [RemoteEntry] = []
     @State private var selection: RemoteEntry? = nil
     @State private var loading = false
@@ -611,7 +623,7 @@ private struct RemoteFileBrowser: View {
         return "未选中时「选择」将使用当前目录"
     }
 
-    private func join(_ dir: String, _ name: String) -> String {
+    func join(_ dir: String, _ name: String) -> String {
         dir.hasSuffix("/") ? dir + name : dir + "/" + name
     }
 
@@ -633,7 +645,7 @@ private struct RemoteFileBrowser: View {
         load(parent.isEmpty ? "/" : parent)
     }
 
-    private func load(_ p: String) {
+    func load(_ p: String) {
         let target = p.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !target.isEmpty else { return }
         loadSeq += 1
@@ -663,17 +675,32 @@ private struct RemoteFileBrowser: View {
 }
 
 // MARK: - 内嵌远端浏览框（下载方向：直接在框里浏览远端文件，替代弹出窗口）
+// 支持：单击选中 / ⌘单击多选 / 拖拽框选多选 / 双击进入文件夹 / 图标·列表视图 / 列表显示文件大小
 private struct RemoteBrowserBox: View {
     let client: SSHClient
-    @Binding var selectedPath: String
-    @State private var currentPath = ""
+    let initialPath: String                       // 初始目录（通常为当前已填的下载路径）
+    var onSelect: ([String]) -> Void = { _ in }   // 多选变化回调，传出完整路径数组
+
+    @State var currentPath = ""
     @State private var entries: [RemoteEntry] = []
-    @State private var selection: RemoteEntry? = nil
+    @State private var selection: Set<RemoteEntry> = []
+    @State private var viewMode: InstallViewMode = .list
     @State private var loading = false
     @State private var errorText = ""
     @State private var pathInput = ""
     @State private var showHidden = false
     @State private var loadSeq = 0
+
+    // 框选状态
+    @State private var itemFrames: [String: CGRect] = [:]   // 条目名 -> 在内容坐标系中的 frame
+    @State private var dragStart: CGPoint? = nil
+    @State private var dragCurrent: CGPoint? = nil
+
+    private var dragRect: CGRect? {
+        guard let s = dragStart, let c = dragCurrent else { return nil }
+        return CGRect(x: min(s.x, c.x), y: min(s.y, c.y),
+                      width: abs(c.x - s.x), height: abs(c.y - s.y))
+    }
 
     var body: some View {
         VStack(spacing: 4) {
@@ -689,12 +716,20 @@ private struct RemoteBrowserBox: View {
                     .buttonStyle(.borderless)
                     .help("刷新")
                     .disabled(currentPath.isEmpty || loading)
-                Toggle("隐藏", isOn: Binding(
+                Picker("", selection: $viewMode) {
+                    ForEach(InstallViewMode.allCases) { m in
+                        Image(systemName: m == .icon ? "square.grid.2x2" : "list.bullet").tag(m)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .controlSize(.mini)
+                .frame(width: 56)
+                Toggle("显示隐藏文件", isOn: Binding(
                     get: { showHidden },
                     set: { showHidden = $0; if !currentPath.isEmpty { load(currentPath) } }
                 ))
                 .toggleStyle(.checkbox)
-                .font(.caption2)
+                .font(.caption)
             }
             Divider()
             ZStack {
@@ -709,40 +744,7 @@ private struct RemoteBrowserBox: View {
                 } else if entries.isEmpty {
                     Text("（空目录）").font(.caption).foregroundStyle(.secondary)
                 } else {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            ForEach(sortedEntries) { e in
-                                HStack(spacing: 5) {
-                                    Image(systemName: e.isDir ? "folder.fill" : "doc")
-                                        .font(.caption2)
-                                        .foregroundStyle(e.isDir ? Color.accentColor : Color.secondary)
-                                        .frame(width: 14)
-                                    Text(e.name)
-                                        .font(.caption)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                    Spacer()
-                                    if selection == e {
-                                        Image(systemName: "checkmark")
-                                            .font(.caption2)
-                                            .foregroundStyle(Color.accentColor)
-                                    }
-                                }
-                                .padding(.vertical, 1.5)
-                                .padding(.horizontal, 4)
-                                .contentShape(Rectangle())
-                                .background(selection == e ? Color.accentColor.opacity(0.15) : Color.clear)
-                                // 顺序关键：双击手势先注册，否则被单击吞掉
-                                .onTapGesture(count: 2) {
-                                    if e.isDir { load(join(currentPath, e.name)) }
-                                }
-                                .onTapGesture(count: 1) {
-                                    selection = e
-                                    selectedPath = join(currentPath, e.name)
-                                }
-                            }
-                        }
-                    }
+                    browserList
                 }
             }
             Text(hint)
@@ -762,6 +764,127 @@ private struct RemoteBrowserBox: View {
         .onAppear { initialLoad() }
     }
 
+    // 内容区：图标网格 / 列表 两视图，均支持单击/⌘多选/框选
+    private var browserList: some View {
+        ScrollView {
+            Group {
+                if viewMode == .icon {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 82), spacing: 8)], spacing: 8) {
+                        entryRows
+                    }
+                    .padding(4)
+                } else {
+                    VStack(alignment: .leading, spacing: 0) {
+                        entryRows
+                    }
+                    .padding(.horizontal, 4)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .topLeading) {
+                // 框选矩形
+                if let r = dragRect {
+                    Rectangle()
+                        .fill(Color.accentColor.opacity(0.15))
+                        .overlay(Rectangle().stroke(Color.accentColor.opacity(0.6), lineWidth: 0.5))
+                        .frame(width: r.width, height: r.height)
+                        .offset(x: r.origin.x, y: r.origin.y)
+                }
+            }
+            .contentShape(Rectangle())
+            .gesture(boxSelectGesture)
+            .coordinateSpace(name: "browserBoxSpace")
+        }
+        .onPreferenceChange(ItemFramesKey.self) { itemFrames = $0 }
+    }
+
+    @ViewBuilder private var entryRows: some View {
+        ForEach(sortedEntries) { e in
+            entryRow(e)
+                .background(GeometryReader { geo in
+                    Color.clear.preference(key: ItemFramesKey.self,
+                                           value: [e.id: geo.frame(in: .named("browserBoxSpace"))])
+                })
+        }
+    }
+
+    @ViewBuilder private func entryRow(_ e: RemoteEntry) -> some View {
+        let isSel = selection.contains(e)
+        if viewMode == .icon {
+            VStack(spacing: 3) {
+                Image(systemName: e.isDir ? "folder.fill" : "doc")
+                    .font(.title3)
+                    .foregroundStyle(e.isDir ? Color.accentColor : Color.secondary)
+                Text(e.name)
+                    .font(.caption2)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+            }
+            .padding(4)
+            .frame(maxWidth: .infinity)
+            .background(isSel ? Color.accentColor.opacity(0.18) : Color.clear)
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(isSel ? Color.accentColor.opacity(0.5) : .clear, lineWidth: 1))
+            .cornerRadius(5)
+            .rowTapGestures(e, box: self)
+        } else {
+            HStack(spacing: 5) {
+                Image(systemName: e.isDir ? "folder.fill" : "doc")
+                    .font(.caption2)
+                    .foregroundStyle(e.isDir ? Color.accentColor : Color.secondary)
+                    .frame(width: 14)
+                Text(e.name)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                // 列表视图后方显示文件大小（目录显示 —）
+                Text(e.isDir ? "—" : Self.formatSize(e.size))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.trailing, 4)
+                if isSel {
+                    Image(systemName: "checkmark")
+                        .font(.caption2)
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(.vertical, 1.5)
+            .padding(.horizontal, 4)
+            .contentShape(Rectangle())
+            .background(isSel ? Color.accentColor.opacity(0.15) : Color.clear)
+            .rowTapGestures(e, box: self)
+        }
+    }
+
+    // 单击(⌘=切换多选) / 双击进文件夹 —— 双击手势必须先注册
+    func handleTap(_ e: RemoteEntry, multi: Bool) {
+        if multi {
+            if selection.contains(e) { selection.remove(e) } else { selection.insert(e) }
+        } else {
+            selection = [e]
+        }
+        syncSelection()
+    }
+
+    private var boxSelectGesture: some Gesture {
+        DragGesture(minimumDistance: 3, coordinateSpace: .named("browserBoxSpace"))
+            .onChanged { g in
+                if dragStart == nil { dragStart = g.startLocation }
+                dragCurrent = g.location
+            }
+            .onEnded { _ in
+                if let rect = dragRect, !rect.isEmpty {
+                    let hit = Set(itemFrames.filter { $0.value.intersects(rect) }.map(\.key))
+                    // 框选命中的条目按排序顺序取回 RemoteEntry
+                    selection = Set(sortedEntries.filter { hit.contains($0.id) })
+                    syncSelection()
+                }
+                dragStart = nil
+                dragCurrent = nil
+            }
+    }
+
     private var sortedEntries: [RemoteEntry] {
         entries.sorted {
             if $0.isDir != $1.isDir { return $0.isDir }
@@ -770,18 +893,30 @@ private struct RemoteBrowserBox: View {
     }
 
     private var hint: String {
-        if let e = selection {
-            return "已选中：\(join(currentPath, e.name))"
+        if selection.isEmpty {
+            return "单击选中，⌘单击多选，拖拽框选，双击进入文件夹；不选则默认对方下载目录"
         }
-        return "单击选中下载文件/文件夹，双击进入文件夹；不选则默认对方下载目录"
+        let paths = sortedEntries.filter { selection.contains($0) }.map { join(currentPath, $0.name) }
+        if paths.count == 1, let p = paths.first {
+            return "已选中：\(p)"
+        }
+        return "已选中 \(paths.count) 项，将依次下载"
     }
 
-    private func join(_ dir: String, _ name: String) -> String {
+    private func syncSelection() {
+        onSelect(sortedEntries.filter { selection.contains($0) }.map { join(currentPath, $0.name) })
+    }
+
+    static func formatSize(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    func join(_ dir: String, _ name: String) -> String {
         dir.hasSuffix("/") ? dir + name : dir + "/" + name
     }
 
     private func initialLoad() {
-        let r = selectedPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let r = initialPath.trimmingCharacters(in: .whitespacesAndNewlines)
         var start = r
         if !r.isEmpty, r != "/", !(r as NSString).pathExtension.isEmpty {
             start = (r as NSString).deletingLastPathComponent
@@ -797,13 +932,14 @@ private struct RemoteBrowserBox: View {
         load(parent.isEmpty ? "/" : parent)
     }
 
-    private func load(_ p: String) {
+    func load(_ p: String) {
         let target = p.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !target.isEmpty else { return }
         loadSeq += 1
         let seq = loadSeq
         let hidden = showHidden
-        selection = nil
+        selection = []
+        syncSelection()
         errorText = ""
         loading = true
         pathInput = target
@@ -824,8 +960,38 @@ private struct RemoteBrowserBox: View {
             }
         }
     }
+
+    // 收集条目 frame 用于框选命中测试
+    private struct ItemFramesKey: PreferenceKey {
+        static var defaultValue: [String: CGRect] = [:]
+        static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+            value.merge(nextValue(), uniquingKeysWith: { $1 })
+        }
+    }
 }
 
+// 单击/双击手势复用（tap 事件里读当前事件判断是否按住 ⌘）
+private struct RowTapGestures: ViewModifier {
+    let entry: RemoteEntry
+    let box: RemoteBrowserBox
+
+    func body(content: Content) -> some View {
+        content
+            .onTapGesture(count: 2) {
+                if entry.isDir { box.load(box.join(box.currentPath, entry.name)) }
+            }
+            .onTapGesture(count: 1) {
+                let cmd = NSApp.currentEvent?.modifierFlags.contains(.command) ?? false
+                box.handleTap(entry, multi: cmd)
+            }
+    }
+}
+
+private extension View {
+    func rowTapGestures(_ e: RemoteEntry, box: RemoteBrowserBox) -> some View {
+        modifier(RowTapGestures(entry: e, box: box))
+    }
+}
 // MARK: - 主 App
 @main
 struct SSHAppInstallerApp: App {
@@ -870,7 +1036,8 @@ struct ContentView: View {
     @State private var droppedInstalls: [String] = []
     @State private var transferLocal: String = ""
     @State private var uploadRemote: String = ""      // 上传目标路径(远端)，与下载路径相互独立
-    @State private var downloadRemote: String = ""    // 下载远端路径
+    @State private var downloadRemote: String = ""    // 下载远端路径(初始起点/记录用)
+    @State private var downloadItems: [String] = []   // 下载框多选的完整路径列表(空=默认对方 Downloads)
     @State private var transferDownload: Bool = false
     @State private var showKeyPicker = false
     @State private var installViewMode: InstallViewMode = .icon
@@ -1078,7 +1245,7 @@ struct ContentView: View {
 
             if transferDownload {
                 // 下载:内嵌远端浏览框(像上传的拖放框一样嵌在界面里,不弹窗) + 本机保存路径
-                RemoteBrowserBox(client: client, selectedPath: $downloadRemote)
+                RemoteBrowserBox(client: client, initialPath: downloadRemote) { downloadItems = $0 }
                     .frame(height: 168)
                 HStack {
                     TextField("保存到本机路径", text: $transferLocal, prompt: Text("默认本机 ~/Downloads/")).textFieldStyle(.roundedBorder)
@@ -1173,25 +1340,33 @@ struct ContentView: View {
                         let l = transferLocal.isEmpty
                             ? (NSHomeDirectory() as NSString).appendingPathComponent("Downloads")
                             : transferLocal
-                        let r = downloadRemote.isEmpty
-                            ? "/Users/\(client.user)/Downloads/"
-                            : downloadRemote
+                        let items = downloadItems.isEmpty
+                            ? ["/Users/\(client.user)/Downloads/"]
+                            : downloadItems
                         client.isBusy = true
                         Task {
-                            // 先判断远端路径是文件夹还是文件
-                            let safeR = r.replacingOccurrences(of: "'", with: "'\\''")
-                            let (okDir, outDir) = client.remote("test -d '\(safeR)' && echo __DIR__ || true")
-                            let isDir = okDir && outDir.contains("__DIR__")
-                            if isDir {
-                                // 文件夹:弹二次确认,询问是否下载全部
-                                await MainActor.run {
-                                    client.isBusy = false
-                                    pendingDownloadRemote = r
-                                    pendingDownloadLocal = l
-                                    showDirConfirm = true
+                            if items.count == 1, let r = items.first {
+                                // 单路径：先判断远端路径是文件夹还是文件
+                                let safeR = r.replacingOccurrences(of: "'", with: "'\\''")
+                                let (okDir, outDir) = client.remote("test -d '\(safeR)' && echo __DIR__ || true")
+                                let isDir = okDir && outDir.contains("__DIR__")
+                                if isDir {
+                                    // 文件夹:弹二次确认,询问是否下载全部
+                                    await MainActor.run {
+                                        client.isBusy = false
+                                        pendingDownloadRemote = r
+                                        pendingDownloadLocal = l
+                                        showDirConfirm = true
+                                    }
+                                } else {
+                                    client.transfer(local: l, remote: r, download: true)
+                                    await MainActor.run { client.isBusy = false }
                                 }
                             } else {
-                                client.transfer(local: l, remote: r, download: true)
+                                // 多选：逐个下载（文件夹整夹下载，不再逐个确认）
+                                for r in items {
+                                    client.transfer(local: l, remote: r, download: true)
+                                }
                                 await MainActor.run { client.isBusy = false }
                             }
                         }
