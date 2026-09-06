@@ -17,10 +17,11 @@ struct RemoteEntry: Identifiable, Equatable, Hashable {
     var id: String { name }
 }
 
-// MARK: - 传输进度（value=nil 表示不确定进度/转圈）
+// MARK: - 传输进度（value=nil 表示不确定进度/转圈；sizeText 如 "12.3 MB / 28.6 MB"）
 struct TransferProgress: Equatable {
     let label: String
     let value: Double?
+    let sizeText: String?
 }
 
 // MARK: - SSH 执行核心
@@ -32,8 +33,8 @@ final class SSHClient: ObservableObject {
     @Published var progress: TransferProgress? = nil   // 安装/上传/下载进度条
     private var toastDismissWork: DispatchWorkItem? = nil
 
-    func setProgress(_ label: String, _ value: Double?) {
-        DispatchQueue.main.async { self.progress = TransferProgress(label: label, value: value) }
+    func setProgress(_ label: String, _ value: Double?, sizeText: String? = nil) {
+        DispatchQueue.main.async { self.progress = TransferProgress(label: label, value: value, sizeText: sizeText) }
     }
     func clearProgress() {
         DispatchQueue.main.async { self.progress = nil }
@@ -287,16 +288,43 @@ final class SSHClient: ObservableObject {
                             args: ["-q", "/dev/null"] + scpCmd,
                             usePassword: !useKey, timeout: timeout) { [weak self] data in
             guard let s = String(data: data, encoding: .utf8) else { return }
-            // scp 进度用 \r 原地刷新，统一拆行后提取 "xx%"
+            // scp 伪 tty 进度行形如: "文件名  42%  12MB  5.2MB/s  00:05"（\r 原地刷新）
+            // 提取百分比 + 已传大小；总大小 = 已传 ÷ 百分比
             for line in s.replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n") {
-                guard let r = line.range(of: #"[0-9]{1,3}%"#, options: .regularExpression) else { continue }
-                if let v = Double(line[r].dropLast()), v >= 0, v <= 100 {
-                    self?.setProgress(label, min(v / 100.0, 1.0))
+                let tokens = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).filter { !$0.isEmpty }
+                guard let i = tokens.firstIndex(where: { tok in
+                    tok.hasSuffix("%") && Double(tok.dropLast()) != nil
+                }) else { continue }
+                guard let v = Double(tokens[i].dropLast()), v >= 0, v <= 100 else { continue }
+                var sizeText: String? = nil
+                if i + 1 < tokens.count {
+                    let transferred = Self.parseSizeBytes(String(tokens[i + 1]))
+                    if transferred > 0, v > 0 {
+                        let total = Double(transferred) / (v / 100.0)
+                        sizeText = "\(Self.formatBytes(transferred)) / \(Self.formatBytes(Int64(total)))"
+                    } else if transferred > 0 {
+                        sizeText = Self.formatBytes(transferred)
+                    }
                 }
+                self?.setProgress(label, min(v / 100.0, 1.0), sizeText: sizeText)
             }
         }
         clearProgress()
         return (ok, out)
+    }
+
+    /// "12.3MB" / "512KB" / "4B" → 字节数（scp 进度用 1024 进制近似）
+    private static func parseSizeBytes(_ s: String) -> Int64 {
+        let units: [(String, Double)] = [("GB", 1_073_741_824.0), ("MB", 1_048_576.0), ("KB", 1_024.0), ("B", 1.0)]
+        for (u, f) in units where s.hasSuffix(u) {
+            let num = Double(s.dropLast(u.count)) ?? 0
+            return Int64(num * f)
+        }
+        return Int64(Double(s) ?? 0)
+    }
+
+    private static func formatBytes(_ b: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: b, countStyle: .file)
     }
 
     func test() -> Bool {
@@ -1421,14 +1449,25 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 10) {
                 Text("日志").font(.headline)
-                // 安装/上传/下载进度条：有百分比走进度条，远端操作阶段显示转圈
+                // 安装/上传/下载进度条：百分比进度条+数字+已传/总大小；远端操作阶段显示转圈
                 if let p = client.progress {
                     if let v = p.value {
                         ProgressView(value: v)
-                            .frame(width: 170)
+                            .frame(width: 150)
+                        Text("\(Int((v * 100).rounded()))%")
+                            .font(.caption)
+                            .monospacedDigit()
+                            .frame(width: 38, alignment: .leading)
                     } else {
                         ProgressView()
                             .controlSize(.small)
+                    }
+                    if let st = p.sizeText {
+                        Text(st)
+                            .font(.caption2)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
                     Text(p.label)
                         .font(.caption)
