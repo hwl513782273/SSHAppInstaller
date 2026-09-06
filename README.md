@@ -67,8 +67,8 @@ bash make_dmg.sh
 
 ### macOS 版本选择
 
-- **Apple Silicon（M1 及更新）— 推荐**：下载 `15-SSHAppInstaller-1.0-universal.dmg`（当前版本为 arm64 构建，macOS 12+ 可运行）。
-- **Intel Mac**：当前版本未内置 x86_64 产物，请从源码构建（`swiftc` 支持 `--target x86_64-apple-macos12` 交叉编译）。
+- **Apple Silicon（M1 及更新）与 Intel — 推荐**：下载 `12-SSHAppInstaller-1.1-universal.dmg`（universal 双架构，macOS 12+ 可运行）。
+- **Intel Mac**：直接下载同一个 universal DMG 即可（已内置 x86_64 切片）。
 
 > DMG 为 ad-hoc 签名、**未公证（notarized）**，首次打开请右键「打开」放行 Gatekeeper。
 
@@ -97,7 +97,7 @@ bash make_dmg.sh
 ### 已知限制
 
 - 目标机需要开启「远程登录」（系统设置 → 通用 → 共享），且写 /Applications 时需要管理员权限（sudo 密码或免密 sudo）。
-- 当前版本的 DMG 为 arm64 构建，Intel Mac 需从源码构建。
+- 当前版本的 DMG 为 universal 构建（arm64 + x86_64），Intel Mac 无需源码构建。
 
 ## English
 
@@ -135,8 +135,8 @@ bash make_dmg.sh
 
 ### Choose a macOS build
 
-- **Apple Silicon (M1 or newer) — Recommended**: download `15-SSHAppInstaller-1.0-universal.dmg` (arm64 build, runs on macOS 12+).
-- **Intel Mac**: no prebuilt x86_64 artifact yet; please build from source (`swiftc --target x86_64-apple-macos12`).
+- **Apple Silicon (M1 or newer) and Intel — Recommended**: download `12-SSHAppInstaller-1.1-universal.dmg` (universal build, runs on macOS 12+).
+- **Intel Mac**: download the same universal DMG (x86_64 slice is included).
 
 > The DMG is ad-hoc signed and **not notarized**. Right-click → Open on first launch to pass Gatekeeper.
 
@@ -165,7 +165,7 @@ bash make_dmg.sh
 ### Known limitations
 
 - The target Mac must have Remote Login enabled (System Settings → General → Sharing), and installing into /Applications requires administrator rights.
-- The current DMG is an arm64 build; Intel Mac users need to build from source.
+- The current DMG is a universal build (arm64 + x86_64); Intel Mac users don't need to build from source.
 
 ## 隐私与安全 / Privacy and security
 
