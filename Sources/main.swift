@@ -24,6 +24,23 @@ struct TransferProgress: Equatable {
     let sizeText: String?
 }
 
+// MARK: - 远端操作系统类型（决定远端命令分支与默认路径）
+enum RemoteOS: String {
+    case macOS = "Mac"
+    case windows = "Windows"
+    case linux = "Linux"
+    case unknown = "未知"
+}
+
+// MARK: - 连接历史（主机/IP/用户名自动保存，可下拉切换/删除）
+struct ConnHistoryItem: Codable, Identifiable, Equatable {
+    var id: String { "\(user)@\(host):\(port)" }
+    var host: String
+    var port: String
+    var user: String
+    var useKey: Bool
+}
+
 // MARK: - SSH 执行核心
 final class SSHClient: ObservableObject {
     @Published var isBusy: Bool = false
@@ -31,6 +48,10 @@ final class SSHClient: ObservableObject {
     @Published var connectionOK: Bool = false
     @Published var toast: ToastInfo? = nil   // 成功浮窗(含显示位置)
     @Published var progress: TransferProgress? = nil   // 安装/上传/下载进度条
+    @Published var remoteOS: RemoteOS = .unknown   // 连接测试成功后探测
+    @Published var history: [ConnHistoryItem] = [] // 连接历史（测试连接成功自动保存）
+    private var windowsDownloadsPath: String = ""  // Windows 探测到的真实下载目录（如 E:/下载）
+    private var windowsHasDDrive: Bool = false     // Windows 是否存在 D 盘（上传默认落 D 盘）
     private var toastDismissWork: DispatchWorkItem? = nil
 
     func setProgress(_ label: String, _ value: Double?, sizeText: String? = nil) {
@@ -86,7 +107,50 @@ final class SSHClient: ObservableObject {
         if let k = d.string(forKey: "ssh_keyPath") { keyPath = k }
     }
 
-    init() { loadConnection() }
+    init() {
+        loadConnection()
+        loadHistory()
+    }
+
+    // MARK: 连接历史（UserDefaults JSON 数组，去重置顶，上限 20 条）
+    private let historyKey = "conn_history"
+
+    private func loadHistory() {
+        if let d = UserDefaults.standard.data(forKey: historyKey),
+           let arr = try? JSONDecoder().decode([ConnHistoryItem].self, from: d) {
+            history = arr
+        }
+    }
+
+    private func persistHistory() {
+        if let d = try? JSONEncoder().encode(history) {
+            UserDefaults.standard.set(d, forKey: historyKey)
+        }
+    }
+
+    private func addHistory() {
+        let ep = trimmedEndpoint(host: host, user: user, port: port)
+        guard !ep.host.isEmpty, !ep.user.isEmpty else { return }
+        history.removeAll { $0.host == ep.host && $0.port == ep.port && $0.user == ep.user }
+        history.insert(ConnHistoryItem(host: ep.host, port: ep.port, user: ep.user, useKey: useKey), at: 0)
+        if history.count > 20 { history = Array(history.prefix(20)) }
+        persistHistory()
+    }
+
+    func deleteHistory(_ item: ConnHistoryItem) {
+        history.removeAll { $0.id == item.id }
+        persistHistory()
+    }
+
+    /// 切换到某条历史连接（填充全部连接字段，旧连接状态作废）
+    func applyHistory(_ item: ConnHistoryItem) {
+        host = item.host
+        port = item.port
+        user = item.user
+        useKey = item.useKey
+        connectionOK = false
+        remoteOS = .unknown
+    }
 
     private func append(_ s: String) {
         DispatchQueue.main.async {
@@ -145,7 +209,10 @@ final class SSHClient: ObservableObject {
     }
 
     private func scpArgs() -> [String] {
-        var a: [String] = ["-o", "StrictHostKeyChecking=no",
+        // -s 强制 SFTP 子系统协议：绕开 legacy scp 模式（伪 tty 下默认走 legacy，需远端有 /usr/bin/scp，
+        // Windows OpenSSH 7.7 的 scp.exe 在 C:\Windows\System32\OpenSSH\ 下，legacy 走 cmd 解析易在含空格/中文/盘符冒号的路径上挂）
+        var a: [String] = ["-s",
+                           "-o", "StrictHostKeyChecking=no",
                            "-o", "UserKnownHostsFile=/dev/null",
                            "-o", "LogLevel=ERROR",
                            "-r",
@@ -340,14 +407,98 @@ final class SSHClient: ObservableObject {
         if ok {
             append("✔ 连接成功")
             saveConnection()
+            addHistory()
+            probeRemoteOS()
         } else {
             append("✗ 连接失败:\(out)")
         }
         return ok
     }
 
+    /// 远端系统探测：Windows 的 sshd 默认 shell 是 cmd.exe，`echo %OS%` 会展开为 Windows_NT，
+    /// POSIX shell 则原样输出字面量 —— 据此区分；POSIX 再用 uname 细分 macOS/Linux。
+    /// Windows 顺带探测真实下载目录（用户可能把"下载"重定向到其他盘，如 E:\下载）。
+    func probeRemoteOS() {
+        let (ok1, out1) = remote("echo %OS%", timeout: 15)
+        let o1 = out1.trimmingCharacters(in: .whitespacesAndNewlines)
+        if ok1, o1.contains("Windows_NT") {
+            remoteOS = .windows
+            // shell:Downloads 是系统认定的下载文件夹，重定向后仍准确
+            let ps = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " +
+                     "Write-Output ((New-Object -ComObject Shell.Application).NameSpace('shell:Downloads').Self.Path)"
+            let cmd = "powershell -NoProfile -EncodedCommand \(encodePSCommand(ps))"
+            let (_, out) = remote(cmd, timeout: 30)
+            let p = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if p.contains(":") {
+                windowsDownloadsPath = p.replacingOccurrences(of: "\\", with: "/")
+                append("· Windows 下载目录：\(windowsDownloadsPath)")
+            }
+            // D 盘存在性（Windows 上传默认落 D 盘）
+            let ps2 = "Write-Output (Test-Path 'D:\\')"
+            let cmd2 = "powershell -NoProfile -EncodedCommand \(encodePSCommand(ps2))"
+            let (_, out2) = remote(cmd2, timeout: 30)
+            windowsHasDDrive = out2.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().contains("true")
+            append("· Windows 上传默认目录：\(windowsHasDDrive ? "D:/" : (windowsDownloadsPath.isEmpty ? "C:/" : windowsDownloadsPath))")
+        } else {
+            let (_, out2) = remote("uname -s", timeout: 15)
+            let u = out2.trimmingCharacters(in: .whitespacesAndNewlines)
+            remoteOS = u.contains("Darwin") ? .macOS : (u.contains("Linux") ? .linux : .unknown)
+        }
+        append("· 远端系统：\(remoteOS.rawValue)")
+    }
+
+    /// 远端默认下载目录（按探测到的系统分支；Windows 优先用探测到的真实路径）
+    func defaultRemoteDownloads() -> String {
+        if remoteOS == .windows {
+            if !windowsDownloadsPath.isEmpty {
+                return windowsDownloadsPath.hasSuffix("/") ? windowsDownloadsPath : windowsDownloadsPath + "/"
+            }
+            if !user.isEmpty {
+                return "C:/Users/\(user)/Downloads/"
+            }
+        }
+        if user.isEmpty { return "" }
+        return "/Users/\(user)/Downloads/"
+    }
+
+    /// Windows 浏览根：虚拟"此电脑"视图，列出所有硬盘
+    static let pcRoot = "此电脑"
+
+    /// 浏览框初始目录：Windows 显示所有硬盘（虚拟"此电脑"视图）；macOS/Linux 落到下载目录
+    func initialBrowsePath() -> String {
+        if remoteOS == .windows { return Self.pcRoot }
+        let d = defaultRemoteDownloads()
+        return d.isEmpty ? "." : d
+    }
+
+    /// 上传默认目标目录：Windows 优先 D 盘（无 D 盘回落下载目录）；macOS/Linux 用下载目录
+    func defaultUploadFolder() -> String {
+        if remoteOS == .windows, windowsHasDDrive { return "D:/" }
+        return defaultRemoteDownloads()
+    }
+
+    /// PowerShell 单引号字符串转义（内部单引号翻倍）
+    func shellQuotePS(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "''") + "'"
+    }
+
+    /// PowerShell -EncodedCommand 需要 UTF-16LE Base64（避开 cmd.exe 引号地狱）
+    func encodePSCommand(_ s: String) -> String {
+        var bytes: [UInt8] = []
+        for unit in s.utf16 {
+            let v = UInt16(unit)
+            bytes.append(UInt8(v & 0xFF))
+            bytes.append(UInt8(v >> 8))
+        }
+        return Data(bytes).base64EncodedString()
+    }
+
     // 安装本地软件包到远端 /Applications
     func install(localPath: String) {
+        if remoteOS == .windows {
+            append("✗ 远端是 Windows，不支持安装 macOS 应用（.app/.dmg/.pkg），仅支持双向传文件")
+            return
+        }
         let name = (localPath as NSString).lastPathComponent
         let ext = (name as NSString).pathExtension.lowercased()
         append("▶ 开始安装:\(name)")
@@ -481,6 +632,9 @@ final class SSHClient: ObservableObject {
     /// 默认不列隐藏文件，showHidden=true 时用 -A 包含。
     /// 返回 (是否成功, 条目列表, 真实绝对路径, 错误信息)。
     func remoteList(_ path: String, showHidden: Bool = false) -> (Bool, [RemoteEntry], String, String) {
+        if remoteOS == .windows {
+            return remoteListWindows(path, showHidden: showHidden)
+        }
         let ls = showHidden ? "ls -lAp" : "ls -lp"   // -l 长格式(带文件大小)，POSIX 选项
         let cmd = "cd \(shellQuote(path)) 2>/dev/null && echo __PWD__$(pwd) && \(ls)"
         let (ok, out) = remote(cmd, timeout: 30)
@@ -508,6 +662,69 @@ final class SSHClient: ObservableObject {
             if let arrow = name.range(of: " -> ") { name = String(name[..<arrow.lowerBound]) }  // 符号链接只取链接名
             if name.hasSuffix("/") { name.removeLast() }
             entries.append(RemoteEntry(name: name, isDir: perms.hasPrefix("d"), size: size))
+        }
+        return (true, entries, realPath, "")
+    }
+
+    /// Windows 远端目录列举：PowerShell -EncodedCommand 输出 tab 分隔行
+    /// （__PWD__行 + 每条目 "是否目录\t大小(目录为空)\t名称"），避开 cmd.exe 引号地狱。
+    /// ⚠️ 脚本必须拼成单行：PowerShell 的续行符是反引号而非 \，多行 \ 会解析失败（真机实测）。
+    private func remoteListWindows(_ path: String, showHidden: Bool) -> (Bool, [RemoteEntry], String, String) {
+        // 虚拟"此电脑"视图：置顶"对方的下载文件夹"，随后列出所有硬盘盘符
+        if path == Self.pcRoot {
+            let ps = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " +
+                "Get-PSDrive -PSProvider FileSystem | ForEach-Object { " +
+                "Write-Output (\"True`t`t\" + $_.Name + ':\\') }"
+            let cmd = "powershell -NoProfile -EncodedCommand \(encodePSCommand(ps))"
+            let (ok, out) = remote(cmd, timeout: 30)
+            guard ok else { return (false, [], "", out) }
+            var items: [RemoteEntry] = []
+            if !windowsDownloadsPath.isEmpty {
+                items.append(RemoteEntry(name: windowsDownloadsPath, isDir: true, size: 0))
+            }
+            for raw in out.components(separatedBy: "\n") {
+                let line = raw.trimmingCharacters(in: CharacterSet(charactersIn: "\r\n \u{FEFF}"))
+                let parts = line.components(separatedBy: "\t")
+                guard parts.count >= 3, parts[0] == "True" else { continue }
+                let name = parts[2...].joined(separator: "\t").replacingOccurrences(of: "\\", with: "/")
+                guard !name.isEmpty else { continue }
+                items.append(RemoteEntry(name: name, isDir: true, size: 0))
+            }
+            return (true, items, Self.pcRoot, "")
+        }
+        let force = showHidden ? "-Force " : ""
+        let ps = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " +
+            "$ErrorActionPreference='Stop'; " +
+            "$WarningPreference='SilentlyContinue'; " +
+            "$InformationPreference='SilentlyContinue'; " +
+            "$ProgressPreference='SilentlyContinue'; " +
+            "try { Set-Location -LiteralPath \(shellQuotePS(path)) } catch { Write-Output '__CD_FAIL__'; exit 1 }; " +
+            "Write-Output ('__PWD__' + (Get-Location).Path); " +
+            "Get-ChildItem \(force)| ForEach-Object { " +
+            "$sz = if ($_.PSIsContainer) { '' } else { $_.Length }; " +
+            "Write-Output ($_.PSIsContainer.ToString() + \"`t\" + $sz + \"`t\" + $_.Name) }"
+        let cmd = "powershell -NoProfile -EncodedCommand \(encodePSCommand(ps))"
+        let (ok, out) = remote(cmd, timeout: 180)   // 首连 PowerShell 需 .NET 模块预热,放宽超时避免 __CD_FAIL__
+        guard ok else { return (false, [], "", out) }
+        var realPath = path
+        var entries: [RemoteEntry] = []
+        for raw in out.components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: CharacterSet(charactersIn: "\r\n \u{FEFF}"))
+            guard !line.isEmpty else { continue }
+            if line.hasPrefix("__PWD__") {
+                // Windows 反斜杠路径统一成正斜杠（scp 目标用正斜杠）
+                realPath = String(line.dropFirst("__PWD__".count)).replacingOccurrences(of: "\\", with: "/")
+            } else if line == "__CD_FAIL__" {
+                return (false, [], "", "无法访问 \(path)")
+            } else {
+                let parts = line.components(separatedBy: "\t")
+                guard parts.count >= 3 else { continue }
+                let isDir = parts[0] == "True"
+                let size = isDir ? 0 : (Int64(parts[1]) ?? 0)
+                let name = parts[2...].joined(separator: "\t")
+                guard !name.isEmpty else { continue }
+                entries.append(RemoteEntry(name: name, isDir: isDir, size: size))
+            }
         }
         return (true, entries, realPath, "")
     }
@@ -653,7 +870,8 @@ private struct RemoteFileBrowser: View {
     }
 
     func join(_ dir: String, _ name: String) -> String {
-        dir.hasSuffix("/") ? dir + name : dir + "/" + name
+        if dir == SSHClient.pcRoot { return name }   // "此电脑"根下选中的就是盘符本身
+        return dir.hasSuffix("/") ? dir + name : dir + "/" + name
     }
 
     // 初始目录：已有输入像文件（带扩展名）则落到其父目录；为空则默认落到对方的下载目录
@@ -664,12 +882,13 @@ private struct RemoteFileBrowser: View {
             start = (r as NSString).deletingLastPathComponent
         }
         if start.isEmpty {
-            start = client.user.isEmpty ? "." : "/Users/\(client.user)/Downloads/"
+            start = client.initialBrowsePath()
         }
         load(start)
     }
 
     private func up() {
+        if currentPath == SSHClient.pcRoot { return }   // 已在"此电脑"根
         let parent = (currentPath as NSString).deletingLastPathComponent
         load(parent.isEmpty ? "/" : parent)
     }
@@ -941,7 +1160,8 @@ private struct RemoteBrowserBox: View {
     }
 
     func join(_ dir: String, _ name: String) -> String {
-        dir.hasSuffix("/") ? dir + name : dir + "/" + name
+        if dir == SSHClient.pcRoot { return name }   // "此电脑"根下选中的就是盘符本身
+        return dir.hasSuffix("/") ? dir + name : dir + "/" + name
     }
 
     private func initialLoad() {
@@ -951,12 +1171,13 @@ private struct RemoteBrowserBox: View {
             start = (r as NSString).deletingLastPathComponent
         }
         if start.isEmpty {
-            start = client.user.isEmpty ? "." : "/Users/\(client.user)/Downloads/"
+            start = client.initialBrowsePath()
         }
         load(start)
     }
 
     private func up() {
+        if currentPath == SSHClient.pcRoot { return }   // 已在"此电脑"根
         let parent = (currentPath as NSString).deletingLastPathComponent
         load(parent.isEmpty ? "/" : parent)
     }
@@ -1062,6 +1283,7 @@ private enum InstallViewMode: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @StateObject private var client = SSHClient()
+    private let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.2.0"
     @State private var droppedInstalls: [String] = []
     @State private var transferLocal: String = ""
     @State private var uploadRemote: String = ""      // 上传目标路径(远端)，与下载路径相互独立
@@ -1076,10 +1298,37 @@ struct ContentView: View {
     @State private var pendingDownloadRemote: String = ""
     @State private var pendingDownloadLocal: String = ""
     @State private var showRemoteBrowser: Bool = false    // 远端文件浏览器
+    @State private var showConnHistory: Bool = false      // 连接历史弹层
 
     var body: some View {
         // 整体固定布局不可滚动（需求）；日志框自身可滚动；高度靠弹性 TabView 适配
         VStack(alignment: .leading, spacing: 10) {
+            // 顶部品牌头：左上角图标+应用名+版本号，右上角关于按钮（macos-app-header 规范）
+            HStack(spacing: 10) {
+                if let img = NSImage(named: NSImage.Name("AppIcon")) {
+                    Image(nsImage: img)
+                        .resizable()
+                        .frame(width: 36, height: 36)
+                        .cornerRadius(8)
+                }
+                Text("SSH App Installer")
+                    .font(.title2.bold())
+                Text("v\(appVersion)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(action: { NSApplication.shared.orderFrontStandardAboutPanel(options: [:]) }) {
+                    Image(systemName: "info.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("关于")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(NSColor.windowBackgroundColor))
+            )
             connectionSection
             Divider()
             TabView {
@@ -1101,13 +1350,72 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.25), value: client.toast)
+        .onAppear {
+            // 安装/更新后自动弹出关于界面验证版权（OPEN_ABOUT=1 触发，避免依赖辅助功能授权）
+            if ProcessInfo.processInfo.environment["OPEN_ABOUT"] != nil {
+                NSApplication.shared.orderFrontStandardAboutPanel(options: [:])
+            }
+        }
     }
 
     // MARK: 连接配置
+    // MARK: 连接历史弹层（点击行=切换连接，垃圾桶=删除该条）
+    private var connHistoryList: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("历史连接").font(.headline)
+                Spacer()
+                Text("点击切换 · 桶删除").font(.caption2).foregroundStyle(.secondary)
+            }
+            .padding(10)
+            Divider()
+            List(client.history) { item in
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(item.host).font(.callout).lineLimit(1)
+                        Text("\(item.user)  ·  端口 \(item.port)  ·  \(item.useKey ? "密钥" : "密码")")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button {
+                        client.applyHistory(item)
+                        showConnHistory = false
+                    } label: {
+                        Image(systemName: "arrow.up.left.circle.fill")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("切换到此连接")
+                    Button {
+                        client.deleteHistory(item)
+                    } label: {
+                        Image(systemName: "trash")
+                            .foregroundStyle(.red)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("删除此记录")
+                }
+                .padding(.vertical, 2)
+                .contentShape(Rectangle())
+            }
+            .listStyle(.plain)
+        }
+        .frame(width: 340, height: min(CGFloat(client.history.count) * 46 + 40, 340))
+    }
+
     private var connectionSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("SSH 连接").font(.headline)
+                if client.remoteOS != .unknown {
+                    Text(client.remoteOS.rawValue)
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                        .foregroundStyle(Color.accentColor)
+                }
                 Spacer()
                 Button(action: {
                     client.isBusy = true
@@ -1124,14 +1432,25 @@ struct ContentView: View {
             }
             HStack(spacing: 10) {
                 // 连接参数一改，先前的连接成功状态立即作废（避免换主机后还显示绿勾）
-                TextField("主机 / IP", text: Binding(get: { client.host }, set: { client.host = $0; client.connectionOK = false }))
+                TextField("主机 / IP", text: Binding(get: { client.host }, set: { client.host = $0; client.connectionOK = false; client.remoteOS = .unknown }))
                     .textFieldStyle(.roundedBorder)
-                TextField("端口", text: Binding(get: { client.port }, set: { client.port = $0; client.connectionOK = false }))
+                Button {
+                    showConnHistory = true
+                } label: {
+                    Image(systemName: "clock.arrow.circlepath")
+                }
+                .buttonStyle(.borderless)
+                .help("历史连接（点击切换，垃圾桶删除）")
+                .disabled(client.history.isEmpty)
+                .popover(isPresented: $showConnHistory, arrowEdge: .bottom) {
+                    connHistoryList
+                }
+                TextField("端口", text: Binding(get: { client.port }, set: { client.port = $0; client.connectionOK = false; client.remoteOS = .unknown }))
                     .textFieldStyle(.roundedBorder).frame(width: 70)
-                TextField("用户名", text: Binding(get: { client.user }, set: { client.user = $0; client.connectionOK = false }))
+                TextField("用户名", text: Binding(get: { client.user }, set: { client.user = $0; client.connectionOK = false; client.remoteOS = .unknown }))
                     .textFieldStyle(.roundedBorder).frame(width: 120)
             }
-            Picker("认证方式", selection: Binding(get: { client.useKey }, set: { client.useKey = $0; client.connectionOK = false })) {
+            Picker("认证方式", selection: Binding(get: { client.useKey }, set: { client.useKey = $0; client.connectionOK = false; client.remoteOS = .unknown })) {
                 Text("SSH 密钥").tag(true)
                 Text("密码").tag(false)
             }
@@ -1181,7 +1500,8 @@ struct ContentView: View {
                 }) {
                     if client.isBusy { ProgressView().controlSize(.small) } else { Text("安装到远端 /Applications（\(droppedInstalls.count)）").bold() }
                 }
-                .disabled(client.isBusy || droppedInstalls.isEmpty)
+                .disabled(client.isBusy || droppedInstalls.isEmpty || client.remoteOS == .windows)
+                .help(client.remoteOS == .windows ? "远端是 Windows，不支持安装 macOS 应用，请使用传文件" : "")
                 .buttonStyle(.borderedProminent)
             }
         }
@@ -1370,15 +1690,23 @@ struct ContentView: View {
                             ? (NSHomeDirectory() as NSString).appendingPathComponent("Downloads")
                             : transferLocal
                         let items = downloadItems.isEmpty
-                            ? ["/Users/\(client.user)/Downloads/"]
+                            ? [client.defaultRemoteDownloads()]
                             : downloadItems
                         client.isBusy = true
                         Task.detached {
                             if items.count == 1, let r = items.first {
-                                // 单路径：先判断远端路径是文件夹还是文件
-                                let safeR = r.replacingOccurrences(of: "'", with: "'\\''")
-                                let (okDir, outDir) = client.remote("test -d '\(safeR)' && echo __DIR__ || true")
-                                let isDir = okDir && outDir.contains("__DIR__")
+                                // 单路径：先判断远端路径是文件夹还是文件（Windows 用 PowerShell Test-Path）
+                                var isDir = false
+                                if client.remoteOS == .windows {
+                                    let ps = "(Test-Path -LiteralPath \(client.shellQuotePS(r)) -PathType Container)"
+                                    let cmd = "powershell -NoProfile -EncodedCommand \(client.encodePSCommand(ps))"
+                                    let (okDir, outDir) = client.remote(cmd, timeout: 30)
+                                    isDir = okDir && outDir.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().contains("true")
+                                } else {
+                                    let safeR = r.replacingOccurrences(of: "'", with: "'\\''")
+                                    let (okDir, outDir) = client.remote("test -d '\(safeR)' && echo __DIR__ || true")
+                                    isDir = okDir && outDir.contains("__DIR__")
+                                }
                                 if isDir {
                                     // 文件夹:弹二次确认,询问是否下载全部
                                     await MainActor.run {
@@ -1402,7 +1730,7 @@ struct ContentView: View {
                     } else {
                         guard !droppedTransfers.isEmpty else { return }
                         let items = droppedTransfers
-                        let r = uploadRemote.isEmpty ? "/Users/\(client.user)/Downloads/" : uploadRemote
+                        let r = uploadRemote.isEmpty ? client.defaultUploadFolder() : uploadRemote
                         client.isBusy = true
                         Task.detached {
                             for p in items { client.transfer(local: p, remote: r, download: false) }
@@ -1500,8 +1828,8 @@ struct ContentView: View {
     // MARK: 文件选择
     private func chooseFile(allowDir: Bool = false) -> String? {
         let panel = NSOpenPanel()
-        panel.canChooseFiles = !allowDir
-        panel.canChooseDirectories = allowDir
+        panel.canChooseFiles = true            // 始终允许选文件（修复上传界面选不中文件）
+        panel.canChooseDirectories = allowDir  // 传文件场景同时允许选文件夹
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
             return url.path
