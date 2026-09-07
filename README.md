@@ -8,14 +8,18 @@
   <b>中文</b> | <a href="#english">English</a>
 </p>
 
-
 <p align="center">
   <img src="https://img.shields.io/badge/platform-macOS-black" alt="platform">
-  <img src="https://img.shields.io/badge/arch-arm64-blue" alt="arch">
-  <img src="https://img.shields.io/badge/engine-SwiftUI-orange" alt="engine">
+  <img src="https://img.shields.io/badge/arch-universal-blue" alt="arch">
+  <img src="https://img.shields.io/badge/engine-SwiftUI%20%7C%20AppKit-orange" alt="engine">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
 </p>
-
+<p align="center">
+  <img src="https://img.shields.io/badge/network-offline%20100%25-8250df" alt="network">
+  <img src="https://img.shields.io/badge/released-2026--09--07-0969da" alt="released">
+  <img src="https://img.shields.io/github/last-commit/hwl513782273/SSHAppInstaller" alt="last commit">
+  <a href="https://github.com/hwl513782273/SSHAppInstaller/releases/latest"><img src="https://img.shields.io/github/v/release/hwl513782273/SSHAppInstaller?sort=semver" alt="release"></a>
+</p>
 
 ---
 
@@ -25,8 +29,8 @@
   <a href="https://github.com/hwl513782273/SSHAppInstaller/issues">问题反馈 / Issues</a>
 </p>
 
-> 一款原生 macOS 图形化工具：填一次 SSH 信息，就能把 `.app` / `.dmg` / `.pkg` 拖拽安装到另一台 Mac 的 /Applications，附带双向传文件，类似「跨 Mac 的应用安装器」。/ A native macOS GUI that installs `.app` / `.dmg` / `.pkg` onto another Mac over SSH with drag-and-drop, plus two-way file transfer — like a cross-Mac app installer.
-
+> 一款原生 macOS 图形化工具：填一次 SSH 信息，就能把 `.app` / `.dmg` / `.pkg` 拖拽安装到另一台 Mac/Windows/Linux，附带双向传文件，类似「跨机器的应用安装器」。/ A native macOS GUI that installs `.app` / `.dmg` / `.pkg` onto another Mac, Windows or Linux over SSH with drag-and-drop, plus two-way file transfer — like a cross-machine app installer.
+>
 > **作者 Author：banqiu** **许可证 License：MIT**（详见 LICENSE）。可自由使用、修改与再分发，须保留版权与许可声明。
 
 
@@ -35,143 +39,143 @@
 
 ### 主要功能
 
-- 原生 SwiftUI 界面：SSH 连接配置集中在一处，主机 / 端口 / 用户名 / 认证方式一次填好，连接成功后自动记住（密码除外）。
-- 图形化远程安装：把 `.app` / `.dmg` / `.pkg` 拖进窗口（支持多个），一键批量安装到目标机的 `/Applications`；非这三种格式会即时提示不支持。
-- 智能安装策略：dmg 自动挂载并定位其中的 .app；安装采用「暂存 → 备份旧版 → 就位」的原子替换，中途失败自动回滚，不会出现旧的删了、新的没装上。
-- 双向传文件：上传支持拖入多个文件 / 文件夹；下载默认定位到对方下载文件夹，远端是文件夹时先二次确认，避免误下整个目录。
-- 双认证方式：SSH 密钥（含自定义密钥路径）或密码二选一；写 `/Applications` 需要的 sudo 密码单独输入，仅驻留内存、从不落盘。
-- 全程日志可视化：每一步（上传 / 挂载 / 复制 / 去隔离）都写进日志区并自动滚动，成功与失败都有浮窗提示。
+- **图形化安装**：顶部品牌头显示应用名与版本，拖入 `.app`/`.dmg`/`.pkg` 一键安装到远端 `/Applications`。
+- **跨系统传输**：向 macOS / Windows（需 OpenSSH Server）/ Linux 上传、下载文件，自动识别远端系统。
+- **智能识别 Windows**：连接 Windows 时显示「此电脑」所有盘符，默认上传到 D 盘，下载列出对方下载文件夹。
+- **远端文件浏览**：双击进目录、单击选中；支持框选/⌘多选、图标/列表视图、显示文件大小、隐藏文件开关。
+- **密钥免密**：支持 SSH 公钥认证（BatchMode），配置一次长期免输密码；也支持密码登录。
+- **原生离线**：SwiftUI + AppKit 原生构建，universal 双架构，全程离线运行、零依赖。
 
-> **平台说明 Platform Note：本工具为 macOS 原生应用（SwiftUI + AppKit，swiftc 直接编译并打包为 `.app` / `.dmg`），暂无 Windows / Linux 版本。**
+> **平台说明 Platform Note：本工具为 macOS 原生应用（SwiftUI + AppKit，打包为 `.app` / `.dmg`），暂无 Windows / Linux 版本。**
 
 ### 快速开始
 
 1. 在 [Releases](https://github.com/hwl513782273/SSHAppInstaller/releases/latest) 下载对应系统的 DMG（见下方「macOS 版本选择」）。
 2. 打开 DMG，把 `SSHAppInstaller.app` 拖入「应用程序」。
 3. 首次打开：右键 → 打开（或终端执行 `xattr -dr com.apple.quarantine /Applications/SSHAppInstaller.app`）。
-4. 填好目标机的主机 / 用户名并测试连接，然后把安装包拖进「安装软件」页，点「安装到远端」。
+4. 填写主机/IP、用户名、端口，选择密钥或密码后即可安装与传文件；历史连接自动保存可下拉切换。
 
-从源码构建（需 macOS 12+ 与 Xcode Command Line Tools 的 Swift 工具链）：
+从源码构建（需 macOS 12+ 与 Swift 工具链）：
 
 ```
-git clone https://github.com/hwl513782273/SSHAppInstaller.git
 cd SSHAppInstaller
 bash build.sh
 ```
 
-打包 DMG（仅需系统自带 hdiutil）：
+打包 DMG（需 macOS 自带 hdiutil）：
 
 ```
 bash make_dmg.sh
+# 产物：12-SSHAppInstaller-1.2.0-universal.dmg
 ```
 
 ### macOS 版本选择
 
-- **Apple Silicon（M1 及更新）与 Intel — 推荐**：下载 `12-SSHAppInstaller-1.1-universal.dmg`（universal 双架构，macOS 12+ 可运行）。
-- **Intel Mac**：直接下载同一个 universal DMG 即可（已内置 x86_64 切片）。
+- **Apple Silicon 与 Intel Mac — 推荐**：下载 `12-SSHAppInstaller-1.2.0-universal.dmg`（universal 双架构，macOS 12+）。
+- 各档 DMG 均为 ad-hoc 签名、**未公证（notarized）**，首次打开请右键「打开」放行 Gatekeeper。各档均由同一套源码构建，源码零改动。
 
-> DMG 为 ad-hoc 签名、**未公证（notarized）**，首次打开请右键「打开」放行 Gatekeeper。
-
-> 仓库「发行版 / Releases」的命名格式为：`支持最低版本-SSHAppInstaller-版本-架构`。第一段数字为该包实际支持的最低 macOS 版本号。
+> 仓库「发行版 / Releases」的命名格式为：`支持最低版本-{软件英文名}-版本-架构`（如 `12-SSHAppInstaller-1.2.0-universal.dmg`）。第一段数字为该包实际支持的最低 macOS 版本号。
 
 ### 支持的功能
 
 | 类别 | 项目 | 说明 |
 |------|------|------|
-| 安装格式 | .app | 自动移除旧版并原子替换到 /Applications，清除隔离标记 |
-| 安装格式 | .dmg | 自动挂载（随机挂载点）、定位内部 .app 后走同一安装流程，用完即卸载 |
-| 安装格式 | .pkg | 调用系统 installer 安装到根目录 |
-| 传输方向 | 上传 | 本机多个文件 / 文件夹 → 远端任意目录（默认对方下载文件夹） |
-| 传输方向 | 下载 | 远端文件 / 文件夹 → 本机；远端为文件夹时二次确认后递归下载 |
-| 认证方式 | SSH 密钥 / 密码 | 密钥支持自定义路径；密码经 SSH_ASKPASS 机制传递，不写磁盘 |
+| 连接 | SSH 密钥/密码认证 | 支持公钥免密（BatchMode）与密码登录 |
+| 连接 | 连接历史 | 自动保存主机/IP/用户，下拉切换/删除 |
+| 远端系统 | macOS / Windows / Linux | 自动识别；Windows 需开启 OpenSSH Server |
+| 传输 | 上传 / 下载 | 进度条+百分比+已传/总量；scp `-s` 强制 SFTP 协议 |
+| 浏览 | 远端文件树 | 双击进目录、单选、隐藏文件开关 |
+| 浏览 | 此电脑根视图(Windows) | 列出所有盘符，D 盘默认上传目录 |
+| 安装 | .app / .dmg / .pkg | 拖拽安装到远端 /Applications |
 
 ### 差异化亮点
 
-- 🖱 **告别命令行**：不用敲一行 ssh / scp / hdiutil，拖进去、点一下就装好。
-- 🧷 **原子替换安装**：先暂存再替换，失败自动回滚旧版，目标机不会出现「应用被删了却没装上」的中间态。
-- 📁 **远端也能浏览选择**：下载路径不再靠手敲，连接后可直接浏览对方文件系统点选文件或文件夹。
-- 🔒 **密码零落盘**：登录密码与 sudo 密码只在内存里；askpass 助手写在随机 0700 临时目录、退出即清理。
-- ⏱ **超时兜底不卡死**：所有 SSH / scp 操作带分层超时，网络挂起时自动终止并给出明确错误。
-- 📜 **日志全程可回溯**：安装 / 传输每一步都进日志区，出问题一眼定位到哪一步。
+- 🔌 **跨系统互联**：macOS / Windows / Linux 统一 SSH 传文件，一台 Mac 管所有机器。
+- 🪟 **Windows 原生支持**：识别「此电脑」所有盘符，默认 D 盘上传，体验贴近资源管理器。
+- 🔐 **密钥免密**：SSH 公钥认证，一次配置长期免输密码，自动化友好。
+- 📊 **精准进度**：实时百分比 + 已传/总大小，大文件传输心里有底。
+- 💾 **连接历史**：自动记忆常用主机，一键切换/删除，告别重复输入。
+- 🎨 **原生体验**：SwiftUI 品牌头，浅色/深色自动适配，贴合 macOS 视觉。
 
 ### 已知限制
 
-- 目标机需要开启「远程登录」（系统设置 → 通用 → 共享），且写 /Applications 时需要管理员权限（sudo 密码或免密 sudo）。
-- 当前版本的 DMG 为 universal 构建（arm64 + x86_64），Intel Mac 无需源码构建。
+- **Windows 需开 OpenSSH Server**：目标 Windows 机须先开启「OpenSSH 服务器」可选功能，否则无法连接。
+- **未公证**：应用为 ad-hoc 签名、未送 Apple 公证，首次打开请右键「打开」放行 Gatekeeper。
+- **远端默认目录**：浏览默认进入对方下载文件夹；macOS 目标机需开启「系统设置 → 通用 → 共享 → 远程登录」。
 
 ## English
 
 ### Highlights
 
-- Native SwiftUI interface: host / port / user / auth configured in one place, remembered on successful connection (except passwords).
-- Drag-and-drop remote install: drop multiple `.app` / `.dmg` / `.pkg` files and install them to the remote `/Applications` in one click; other formats are rejected with an instant notice.
-- Smart install strategy: DMGs are auto-mounted and their .app located; installs use a staging-then-swap atomic replace that rolls back on failure.
-- Two-way transfer: upload multiple local files/folders; download defaults to the remote Downloads folder, with a confirmation dialog when the remote path is a directory.
-- Two auth modes: SSH key (custom path supported) or password; the sudo password required for /Applications is entered separately and never written to disk.
-- Full log visibility: every step (upload / mount / copy / quarantine removal) is logged with auto-scrolling, plus toast notifications for success and failure.
+- **Graphical install**: drag `.app` / `.dmg` / `.pkg` onto the window to install on the remote `/Applications`.
+- **Cross-platform transfer**: upload/download to macOS / Windows (OpenSSH Server required) / Linux, with auto OS detection.
+- **Windows aware**: lists every drive under "This PC", defaults uploads to D:, shows the remote Downloads folder.
+- **Remote browser**: double-click to enter folders, box/⌘ multi-select, icon & list views, size column, hidden-file toggle.
+- **Key-based auth**: SSH public-key (BatchMode) for passwordless login, or password login.
+- **Native & offline**: SwiftUI + AppKit, universal binary, fully offline, zero dependencies.
 
-> **Platform Note: this is a native macOS app (SwiftUI + AppKit, compiled with swiftc and packaged as `.app` / `.dmg`). There is no Windows / Linux build.**
+> **Platform Note: this is a native macOS app (SwiftUI + AppKit, packaged as `.app` / `.dmg`). There is no Windows / Linux build.**
 
 ### Quick start
 
 1. Download the DMG for your system from [Releases](https://github.com/hwl513782273/SSHAppInstaller/releases/latest) (see "Choose a macOS build" below).
 2. Open the DMG and drag `SSHAppInstaller.app` into "Applications".
 3. First launch: right-click → Open (or run `xattr -dr com.apple.quarantine /Applications/SSHAppInstaller.app`).
-4. Fill in the target Mac's host / username and test the connection, then drop installers into the Install tab and click the install button.
+4. Fill host/IP, user and port, pick key or password, then install & transfer; history is auto-saved and switchable.
 
-Build from source (requires macOS 12+ and the Swift toolchain from Xcode Command Line Tools):
+Build from source (requires macOS 12+ and the Swift toolchain):
 
 ```
-git clone https://github.com/hwl513782273/SSHAppInstaller.git
 cd SSHAppInstaller
 bash build.sh
 ```
 
-Package the DMG (requires only the built-in hdiutil):
+Package the DMG (requires macOS hdiutil):
 
 ```
 bash make_dmg.sh
+# output: 12-SSHAppInstaller-1.2.0-universal.dmg
 ```
 
 ### Choose a macOS build
 
-- **Apple Silicon (M1 or newer) and Intel — Recommended**: download `12-SSHAppInstaller-1.1-universal.dmg` (universal build, runs on macOS 12+).
-- **Intel Mac**: download the same universal DMG (x86_64 slice is included).
+- **Apple Silicon & Intel Mac — Recommended**: download `12-SSHAppInstaller-1.2.0-universal.dmg` (universal, macOS 12+).
+- All DMGs are ad-hoc signed and **not notarized**. Right-click → Open on first launch to pass Gatekeeper. All variants are built from the same source with zero modification.
 
-> The DMG is ad-hoc signed and **not notarized**. Right-click → Open on first launch to pass Gatekeeper.
-
-> Release naming format: `minimum-macOS-version-SSHAppInstaller-version-arch`. The first number is the minimum macOS version the package actually supports.
+> Release naming format: `minimum-macOS-version-{software}-version-arch` (e.g. `12-SSHAppInstaller-1.2.0-universal.dmg`).
 
 ### Supported features
 
 | Category | Item | Description |
 |----------|------|-------------|
-| Install | .app | Removes the old copy and atomically replaces it in /Applications, clearing quarantine |
-| Install | .dmg | Auto-mounts at a random mount point, locates the inner .app, then follows the same install flow |
-| Install | .pkg | Invokes the system installer against the root volume |
-| Transfer | Upload | Multiple local files/folders → any remote directory (defaults to the remote Downloads folder) |
-| Transfer | Download | Remote file/folder → local; directories require an explicit confirmation before recursive download |
-| Auth | SSH key / password | Custom key path supported; passwords go through the SSH_ASKPASS mechanism, never written to disk |
+| Connection | SSH key / password | Public-key (BatchMode) passwordless or password login |
+| Connection | History | Auto-saves host/IP/user; switch/delete from dropdown |
+| Remote OS | macOS / Windows / Linux | Auto-detected; Windows needs OpenSSH Server |
+| Transfer | Upload / Download | Progress + percent + sent/total; `scp -s` forces SFTP |
+| Browser | Remote tree | Double-click to enter, single select, hidden toggle |
+| Browser | This PC (Windows) | Lists all drives, D: default upload |
+| Install | .app / .dmg / .pkg | Drag to install on remote /Applications |
 
 ### Why this tool
 
-- 🖱 **No command line**: not a single ssh / scp / hdiutil invocation — drop files, click a button.
-- 🧷 **Atomic replace**: staging first, then swap; failures roll back so the remote Mac is never left with the app deleted but nothing installed.
-- 📁 **Remote path picker**: pick remote files or folders visually instead of typing paths.
-- 🔒 **Zero on-disk secrets**: login and sudo passwords live only in memory; the askpass helper sits in a random 0700 temp directory and is cleaned up on exit.
-- ⏱ **Timeout guardrails**: every SSH / scp operation has tiered timeouts, so a hung network terminates with a clear error instead of freezing the UI.
-- 📜 **Traceable logs**: each step lands in the log panel with auto-scroll for quick diagnosis.
+- 🔌 **Cross-platform**: one Mac manages files on macOS / Windows / Linux over SSH.
+- 🪟 **Windows native**: enumerates every drive under "This PC", defaults to D:.
+- 🔐 **Passwordless keys**: SSH public-key auth, configure once.
+- 📊 **Accurate progress**: live percent + sent/total size.
+- 💾 **Connection history**: remembers hosts, one-click switch/delete.
+- 🎨 **Native feel**: SwiftUI header, light/dark adaptive.
 
 ### Known limitations
 
-- The target Mac must have Remote Login enabled (System Settings → General → Sharing), and installing into /Applications requires administrator rights.
-- The current DMG is a universal build (arm64 + x86_64); Intel Mac users don't need to build from source.
+- **Windows needs OpenSSH Server**: enable the "OpenSSH Server" optional feature on the target first.
+- **Not notarized**: ad-hoc signed; right-click → Open on first launch.
+- **Default remote dir**: browser opens the remote Downloads folder; macOS targets need "Remote Login" enabled.
 
 ## 隐私与安全 / Privacy and security
 
-- 全程只在本机与目标机之间直连（ssh / scp），不经过任何第三方服务器；登录密码与 sudo 密码仅驻留内存，从不写盘、不随配置持久化。/ All traffic goes directly between your Mac and the target over ssh/scp; passwords stay in memory only and are never persisted.
-- 连接配置（主机 / 端口 / 用户名 / 密钥路径）保存在本机 UserDefaults，可随时清除；askpass 助手脚本位于随机命名的 0700 临时目录并在退出时删除。/ Connection settings live in local UserDefaults; the askpass helper uses a random 0700 temp directory removed on exit.
-- 应用未公证（notarized），请仅从你信任的来源获取，并在首次打开时右键放行。/ The app is not notarized — obtain it only from sources you trust and allow it via right-click on first launch.
+- 全程本地运行，不收集、不上传任何数据 / Runs entirely locally; no telemetry or uploads.
+- SSH 私钥留存本机，连接历史存于本机 UserDefaults / Keys stay on your Mac; history is kept in UserDefaults.
+- 应用未公证（notarized），请仅从你信任的来源获取，首次打开右键放行 / Not notarized; obtain only from trusted sources and right-click to open.
 
 ## 许可证 / License
 
@@ -182,4 +186,4 @@ bash make_dmg.sh
 
 ## 支持 / Support
 
-SSH 应用安装器 是一款免费开源工具，基于 MIT 许可发布，离线、无广告。如果你觉得好用，欢迎在 GitHub 上点个 Star，或反馈问题 / 提交 PR 帮它变得更好 —— 纯自愿。 SSHAppInstaller is free, open-source, and ad-free. If it helps you, a GitHub Star or an issue/PR is warmly welcome — entirely optional.
+SSH 应用安装器是一款免费开源工具，基于 MIT 许可发布，离线、无广告。如果你觉得好用，欢迎在 GitHub 上点个 Star，或反馈问题 / 提交 PR 帮它变得更好 —— 纯自愿。 SSHAppInstaller is free, open-source, and ad-free. If it helps you, a GitHub Star or an issue/PR is warmly welcome — entirely optional.
